@@ -67,7 +67,7 @@ const D: Record<string, LocaleMap> = {
   'model.inferenceFramework':   { 'zh-CN': '推理框架', 'zh-TW': '推理框架', en: 'Framework',         ja: '推論フレームワーク', ko: '추론 프레임워크' },
   'model.inferenceFrameworkValue':{'zh-CN':'ONNX Runtime','zh-TW':'ONNX Runtime',en:'ONNX Runtime',  ja:'ONNX Runtime',   ko:'ONNX Runtime' },
   'model.size':                 { 'zh-CN': '体积',     'zh-TW': '體積',     en: 'Size',              ja: 'サイズ',        ko: '크기' },
-  'model.sizeValue':            { 'zh-CN': '~350 MB',  'zh-TW': '~350 MB',  en: '~350 MB',           ja: '~350 MB',       ko: '~350 MB' },
+  'model.sizeValue':            { 'zh-CN': '~304 MB',  'zh-TW': '~304 MB',  en: '~304 MB',           ja: '~304 MB',       ko: '~304 MB' },
 
   // ── History tab ────────────────────────────────────────
   'history.totalDuration':  { 'zh-CN': '累计时长', 'zh-TW': '累計時長', en: 'Total duration',  ja: '累計時間',    ko: '총 시간' },
