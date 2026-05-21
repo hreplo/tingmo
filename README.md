@@ -2,7 +2,7 @@
 
 **Desktop AI Voice Input for Windows** — press Right Alt, speak, release, and your speech becomes text at the cursor. Fully offline ASR with optional LLM refinement.
 
-![version](https://img.shields.io/badge/version-0.2.0-orange)
+![version](https://img.shields.io/badge/version-0.2-orange)
 ![platform](https://img.shields.io/badge/platform-Windows%20x64-blue)
 ![license](https://img.shields.io/badge/license-MIT-green)
 
@@ -18,7 +18,7 @@
 
 ## Installation
 
-Download `TingMo-Setup-0.2.0.exe` from [Releases](https://github.com/yangshaoxin12/tingmo/releases).
+Download `TingMo-Setup-0.2.exe` from [Releases](https://github.com/yangshaoxin12/tingmo/releases).
 
 First launch downloads the ASR model (~230MB) automatically. Punctuation model (~280MB) is optional — download separately and place in `%APPDATA%/tingmo/models/funasr/`.
 
