@@ -62,8 +62,9 @@ const api = {
   getHistory: () => ipcRenderer.invoke('history:get'),
   clearHistory: () => ipcRenderer.invoke('history:clear'),
 
-  // Translate mode
+  // Hotkey management
   setTranslateModifier: (keyName: string) => ipcRenderer.invoke('settings:set-translate-modifier', keyName),
+  setRecordingHotkey: (keyName: string) => ipcRenderer.invoke('settings:set-hotkey', keyName),
   onTranslateMode: (callback: (data: { enabled: boolean }) => void) => {
     const handler = (_event: Electron.IpcRendererEvent, data: { enabled: boolean }) => callback(data);
     ipcRenderer.on('voice:translate-mode', handler);
@@ -79,6 +80,10 @@ const api = {
   getRefinementStatus: () => ipcRenderer.invoke('settings:refinement-status'),
   getSystemLocale: () => ipcRenderer.invoke('settings:get-system-locale') as Promise<string>,
   setUiLanguage: (lang: string) => ipcRenderer.invoke('settings:set-ui-language', lang),
+
+  // Settings persistence
+  loadAllSettings: () => ipcRenderer.invoke('settings:load-all'),
+  saveAllSettings: (settings: Record<string, unknown>) => ipcRenderer.invoke('settings:save-all', settings),
 };
 
 contextBridge.exposeInMainWorld('tingmo', api);

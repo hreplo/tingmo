@@ -5,14 +5,15 @@ export const WM_KEYUP = 0x0101;
 export const WM_SYSKEYDOWN = 0x0104;
 export const WM_SYSKEYUP = 0x0105;
 
-export interface RightAltEventInput {
+export interface HotkeyEventInput {
   nCode: number;
   message: number;
   vkCode: number;
+  targetVk: number;
   wasPressed: boolean;
 }
 
-export interface RightAltEventAction {
+export interface HotkeyEventAction {
   consume: boolean;
   nextWasPressed: boolean;
   triggerPressed: boolean;
@@ -21,8 +22,8 @@ export interface RightAltEventAction {
 const KEY_DOWN_MESSAGES = new Set([WM_KEYDOWN, WM_SYSKEYDOWN]);
 const KEY_UP_MESSAGES = new Set([WM_KEYUP, WM_SYSKEYUP]);
 
-export function getRightAltEventAction(input: RightAltEventInput): RightAltEventAction {
-  if (input.nCode < 0 || input.vkCode !== VK_RMENU) {
+export function getHotkeyEventAction(input: HotkeyEventInput): HotkeyEventAction {
+  if (input.nCode < 0 || input.vkCode !== input.targetVk) {
     return {
       consume: false,
       nextWasPressed: input.wasPressed,

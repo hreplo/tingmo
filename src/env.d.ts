@@ -18,6 +18,7 @@ interface TingMoAPI {
   }) => Promise<void>;
   onTranslateMode: (cb: (data: { enabled: boolean }) => void) => () => void;
   setTranslateModifier: (keyName: string) => Promise<void>;
+  setRecordingHotkey: (keyName: string) => Promise<void>;
   getStats: () => Promise<{ totalDurationMs: number; totalCharCount: number; totalSessions: number }>;
   getHistory: () => Promise<Array<{ id: string; text: string; charCount: number; timestamp: number }>>;
   clearHistory: () => Promise<void>;
@@ -29,6 +30,9 @@ interface TingMoAPI {
   getRefinementStatus: () => Promise<{ ready: boolean; provider: string | null }>;
   getSystemLocale: () => Promise<string>;
   setUiLanguage: (lang: string) => Promise<void>;
+  // Settings persistence
+  loadAllSettings: () => Promise<Record<string, unknown> | null>;
+  saveAllSettings: (settings: Record<string, unknown>) => Promise<void>;
 }
 
 declare global {

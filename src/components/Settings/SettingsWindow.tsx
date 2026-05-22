@@ -166,7 +166,7 @@ export const SettingsWindow: React.FC = () => {
               <div className="nb-card">
                 <div className="nb-row">
                   <span className="nb-label">{t('settings.voiceInput')}</span>
-                  <HotkeyRecorder currentHotkey={hotkey} onHotkeyChange={setHotkey} onReset={resetHotkey} />
+                  <HotkeyRecorder currentHotkey={hotkey} onHotkeyChange={(key) => { setHotkey(key); window.tingmo?.setRecordingHotkey(key); }} onReset={() => { resetHotkey(); window.tingmo?.setRecordingHotkey('右 Alt'); }} />
                 </div>
                 <div className="nb-hr" />
                 <div className="nb-row">

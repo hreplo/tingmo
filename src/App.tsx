@@ -3,6 +3,7 @@ import { I18nProvider } from './i18n/context';
 import { useSettingsStore } from './store/settings';
 import { FloatingWindow } from './components/FloatingWindow';
 import { SettingsWindow } from './components/Settings/SettingsWindow';
+import { ErrorBoundary } from './components/ErrorBoundary';
 
 const AppInner: React.FC = () => {
   const isSettings = window.location.hash === '#/settings';
@@ -16,17 +17,24 @@ const AppInner: React.FC = () => {
 
 export const App: React.FC = () => {
   const setUiLanguage = useSettingsStore((s) => s.setUiLanguage);
+  const hydrate = useSettingsStore((s) => s.hydrate);
+  const hydrated = useSettingsStore((s) => s._hydrated);
 
-  // Detect system language on first load
   useEffect(() => {
-    window.tingmo?.getSystemLocale().then((locale) => {
-      if (locale) setUiLanguage(locale as any);
-    }).catch(() => {});
-  }, [setUiLanguage]);
+    hydrate().then(() => {
+      window.tingmo?.getSystemLocale().then((locale) => {
+        if (locale) setUiLanguage(locale as any);
+      }).catch(() => {});
+    });
+  }, [hydrate, setUiLanguage]);
+
+  if (!hydrated) return null;
 
   return (
-    <I18nProvider>
-      <AppInner />
-    </I18nProvider>
+    <ErrorBoundary>
+      <I18nProvider>
+        <AppInner />
+      </I18nProvider>
+    </ErrorBoundary>
   );
 };

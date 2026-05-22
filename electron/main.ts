@@ -54,9 +54,10 @@ let autoDismissTimer: ReturnType<typeof setTimeout> | null = null;
 let recordingStartedAt: number = 0;
 let translateMode: boolean = false;
 let translateModifierVK: number = 0xA1; // default: VK_RSHIFT
+let recordingHotkeyVK: number = 0xA5; // default: VK_RMENU (右 Alt)
 
-// Key name → VK code mapping for translate modifier
-const MODIFIER_VK_MAP: Record<string, number> = {
+// Key name → VK code mapping
+const VK_NAME_MAP: Record<string, number> = {
   '右 Shift': 0xA1, 'Right Shift': 0xA1,
   '右 Ctrl': 0xA3, 'Right Ctrl': 0xA3,
   '左 Shift': 0xA0, 'Left Shift': 0xA0,
@@ -92,7 +93,18 @@ async function initRecognition(): Promise<void> {
 
     if (provider === 'cloud') {
       const { FunASRCloudProvider } = require('../src/services/funasr-cloud');
-      recognitionProvider = new FunASRCloudProvider('', '');
+      // Read cloud ASR endpoint from settings
+      let asrEndpoint = 'http://localhost:10095';
+      let asrApiKey = '';
+      try {
+        const p = join(app.getPath('userData'), 'data', 'settings.json');
+        if (fs.existsSync(p)) {
+          const s = JSON.parse(fs.readFileSync(p, 'utf-8'));
+          asrEndpoint = s.asrEndpoint || asrEndpoint;
+          asrApiKey = s.asrApiKey || '';
+        }
+      } catch { /* use default */ }
+      recognitionProvider = new FunASRCloudProvider({ endpoint: asrEndpoint, apiKey: asrApiKey });
       recognitionReady = await recognitionProvider.initialize();
       console.log('[Main] Recognition ready (cloud):', recognitionReady);
     } else {
@@ -482,8 +494,18 @@ app.whenReady().then(async () => {
   ipcMain.handle('history:get', () => loadHistory());
   ipcMain.handle('history:clear', () => { clearHistory(); });
   ipcMain.handle('settings:set-translate-modifier', (_event, keyName: string) => {
-    translateModifierVK = MODIFIER_VK_MAP[keyName] ?? 0xA1;
+    translateModifierVK = VK_NAME_MAP[keyName] ?? 0xA1;
     console.log('[Main] Translate modifier set to', keyName, 'VK =', translateModifierVK);
+  });
+
+  ipcMain.handle('settings:set-hotkey', (_event, hotkeyName: string) => {
+    const vk = VK_NAME_MAP[hotkeyName];
+    if (vk && vk !== recordingHotkeyVK) {
+      recordingHotkeyVK = vk;
+      console.log('[Main] Recording hotkey changed to', hotkeyName, 'VK =', vk);
+      stopHotkey();
+      startHotkey(vk);
+    }
   });
 
   // System locale detection
@@ -554,6 +576,30 @@ app.whenReady().then(async () => {
 
   ipcMain.handle('settings:refinement-status', () => {
     return { ready: refinementReady, provider: refinementProvider?.name || null };
+  });
+
+  // Settings persistence — unified settings.json in userData
+  const SETTINGS_PATH = join(app.getPath('userData'), 'data', 'settings.json');
+
+  ipcMain.handle('settings:load-all', () => {
+    try {
+      const fs = require('fs');
+      if (fs.existsSync(SETTINGS_PATH)) {
+        return JSON.parse(fs.readFileSync(SETTINGS_PATH, 'utf-8'));
+      }
+    } catch { /* file doesn't exist yet */ }
+    return null;
+  });
+
+  ipcMain.handle('settings:save-all', (_event, settings: Record<string, unknown>) => {
+    try {
+      const fs = require('fs');
+      const dir = join(app.getPath('userData'), 'data');
+      if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(SETTINGS_PATH, JSON.stringify(settings, null, 2), 'utf-8');
+    } catch (err: any) {
+      console.error('[Main] Failed to save settings:', err.message);
+    }
   });
 
   ipcMain.handle('voice:finish-recording', () => {
@@ -709,7 +755,18 @@ app.whenReady().then(async () => {
     recognitionProvider = null;
     initRecognition();
   });
-  startHotkey();
+  // Read recording hotkey from settings, default to Right Alt
+  try {
+    const fs = require('fs');
+    const settingsPath = join(app.getPath('userData'), 'data', 'settings.json');
+    if (fs.existsSync(settingsPath)) {
+      const s = JSON.parse(fs.readFileSync(settingsPath, 'utf-8'));
+      if (s.hotkey) {
+        recordingHotkeyVK = VK_NAME_MAP[s.hotkey] ?? 0xA5;
+      }
+    }
+  } catch { /* use default */ }
+  startHotkey(recordingHotkeyVK);
 
   // Show settings on first launch so user knows the app started
   createSettingsWindow();

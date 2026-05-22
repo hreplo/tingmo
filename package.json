@@ -4,7 +4,8 @@
   "description": "听墨 - 桌面 AI 语音输入法",
   "main": "dist-electron/main.js",
   "scripts": {
-    "dev": "vite",
+    "dev": "node scripts/dev.mjs",
+    "vite": "vite",
     "build": "npm run build:main && npm run build:renderer",
     "build:main": "esbuild electron/main.ts --bundle --platform=node --outfile=dist-electron/main.js --external:electron --external:koffi --external:path --external:onnxruntime-node --format=cjs && esbuild electron/preload.ts --bundle --platform=node --outfile=dist-electron/preload.js --external:electron --external:koffi --format=cjs",
     "build:renderer": "tsc && vite build",
