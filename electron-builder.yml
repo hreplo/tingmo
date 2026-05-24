@@ -34,3 +34,4 @@ nsis:
   createStartMenuShortcut: true
   shortcutName: TingMo
   artifactName: "TingMo-Setup-${version}.${ext}"
+  include: assets/uninstall.nsh
