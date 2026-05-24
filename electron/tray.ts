@@ -1,10 +1,37 @@
-import { Tray, Menu, nativeImage, NativeImage } from 'electron';
+import { Tray, Menu, nativeImage, NativeImage, app } from 'electron';
 import { join } from 'path';
+import { existsSync, readFileSync, writeFileSync, mkdirSync } from 'fs';
 import { trayT } from './tray-i18n';
 
 type Locale = string;
 
 let asrProvider: 'local' | 'cloud' = 'local';
+let onAsrProviderChange: (() => void) | null = null;
+
+function loadAsrProvider(): 'local' | 'cloud' {
+  try {
+    const p = join(app.getPath('userData'), 'data', 'llm-settings.json');
+    if (existsSync(p)) {
+      const s = JSON.parse(readFileSync(p, 'utf-8'));
+      return s.asrProvider || 'local';
+    }
+  } catch { /* ignore */ }
+  return 'local';
+}
+
+function saveAsrProvider(provider: 'local' | 'cloud'): void {
+  try {
+    const dir = join(app.getPath('userData'), 'data');
+    if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
+    const p = join(dir, 'llm-settings.json');
+    let existing: any = {};
+    if (existsSync(p)) {
+      try { existing = JSON.parse(readFileSync(p, 'utf-8')); } catch { /* ignore */ }
+    }
+    existing.asrProvider = provider;
+    writeFileSync(p, JSON.stringify(existing, null, 2));
+  } catch { /* ignore */ }
+}
 
 // Load base icon from assets (also used as app icon)
 const baseIconPath = join(__dirname, '../assets/icons/icon.png');
@@ -61,13 +88,21 @@ function buildMenu(
           label: t('tray.voiceMode.local'),
           type: 'radio',
           checked: asrProvider === 'local',
-          click: () => { asrProvider = 'local'; },
+          click: () => {
+            asrProvider = 'local';
+            saveAsrProvider('local');
+            onAsrProviderChange?.();
+          },
         },
         {
           label: t('tray.voiceMode.cloud'),
           type: 'radio',
           checked: asrProvider === 'cloud',
-          click: () => { asrProvider = 'cloud'; },
+          click: () => {
+            asrProvider = 'cloud';
+            saveAsrProvider('cloud');
+            onAsrProviderChange?.();
+          },
         },
       ],
     },

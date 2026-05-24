@@ -653,8 +653,18 @@ if (app) {
   ipcMain.handle('history:get', () => loadHistory());
   ipcMain.handle('history:clear', () => { clearHistory(); });
   ipcMain.handle('settings:set-translate-modifier', (_event, keyName: string) => {
-    translateModifierVK = MODIFIER_VK_MAP[keyName] ?? 0xA1;
+    translateModifierVK = VK_NAME_MAP[keyName] ?? 0xA1;
     console.log('[Main] Translate modifier set to', keyName, 'VK =', translateModifierVK);
+  });
+
+  ipcMain.handle('settings:set-hotkey', (_event, hotkeyName: string) => {
+    const vk = VK_NAME_MAP[hotkeyName];
+    if (vk && vk !== recordingHotkeyVK) {
+      recordingHotkeyVK = vk;
+      console.log('[Main] Recording hotkey changed to', hotkeyName, 'VK =', vk);
+      stopHotkey();
+      startHotkey(vk);
+    }
   });
 
   // System locale detection
@@ -725,6 +735,30 @@ if (app) {
 
   ipcMain.handle('settings:refinement-status', () => {
     return { ready: refinementReady, provider: refinementProvider?.name || null };
+  });
+
+  // Settings persistence — unified settings.json in userData
+  const SETTINGS_PATH = join(app.getPath('userData'), 'data', 'settings.json');
+
+  ipcMain.handle('settings:load-all', () => {
+    try {
+      const fs = require('fs');
+      if (fs.existsSync(SETTINGS_PATH)) {
+        return JSON.parse(fs.readFileSync(SETTINGS_PATH, 'utf-8'));
+      }
+    } catch { /* file doesn't exist yet */ }
+    return null;
+  });
+
+  ipcMain.handle('settings:save-all', (_event, settings: Record<string, unknown>) => {
+    try {
+      const fs = require('fs');
+      const dir = join(app.getPath('userData'), 'data');
+      if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(SETTINGS_PATH, JSON.stringify(settings, null, 2), 'utf-8');
+    } catch (err: any) {
+      console.error('[Main] Failed to save settings:', err.message);
+    }
   });
 
   ipcMain.handle('voice:finish-recording', () => {

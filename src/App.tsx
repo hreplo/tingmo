@@ -44,8 +44,10 @@ export const App: React.FC = () => {
   }, [hydrate, setUiLanguage]);
 
   return (
-    <I18nProvider>
-      <AppInner />
-    </I18nProvider>
+    <ErrorBoundary>
+      <I18nProvider>
+        <AppInner />
+      </I18nProvider>
+    </ErrorBoundary>
   );
 };

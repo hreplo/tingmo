@@ -1,5 +1,11 @@
 import type { IRecognitionProvider, RecognitionResult } from './speech-recognition';
 
+export interface FunASRCloudConfig {
+  endpoint: string;        // e.g. http://localhost:10095
+  apiKey?: string;         // optional auth token
+  timeoutMs?: number;
+}
+
 export class FunASRCloudProvider implements IRecognitionProvider {
   readonly name = 'FunASR-Cloud';
   readonly type = 'api' as const;
@@ -14,12 +20,31 @@ export class FunASRCloudProvider implements IRecognitionProvider {
       this.isReady = false;
       return false;
     }
+    try {
+      const ctrl = new AbortController();
+      setTimeout(() => ctrl.abort(), 3000);
+      const res = await fetch(`${this.endpoint}/api/status`, {
+        method: 'GET',
+        signal: ctrl.signal,
+      });
+      if (res.ok) {
+        this.isReady = true;
+        console.log('[FunASR-Cloud] Server reachable at', this.endpoint);
+        return true;
+      }
+    } catch {
+      console.log('[FunASR-Cloud] Server unreachable, will try on transcribe');
+    }
     this.isReady = true;
     console.log('[FunASR-Cloud] Ready, model:', this.model);
     return true;
   }
 
-  async transcribe(audioBuffer: Buffer, _sampleRate: number, lang?: string): Promise<RecognitionResult> {
+  async transcribe(
+    audioBuffer: Buffer,
+    _sampleRate: number,
+    lang?: string,
+  ): Promise<RecognitionResult> {
     const t0 = performance.now();
 
     const baseUrl = this.baseUrl.replace(/\/$/, '');

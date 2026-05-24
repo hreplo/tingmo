@@ -71,8 +71,11 @@ export function setEscCallback(cb: () => void): void {
   escCallback = cb;
 }
 
-export function startHotkey(): void {
-  if (hookHandle) return;
+export function startHotkey(vkCode?: number): void {
+  if (vkCode !== undefined) currentVk = vkCode;
+  if (hookHandle) {
+    stopHotkey();
+  }
 
   hookProc = koffi.register((nCode: number, wParam: number, lParam: unknown) => {
     try {
@@ -90,6 +93,7 @@ export function startHotkey(): void {
         nCode,
         message: Number(wParam),
         vkCode: event?.vkCode ?? 0,
+        targetVk: currentVk,
         wasPressed,
       });
 
@@ -153,7 +157,7 @@ export function stopHotkey(): void {
 export async function waitForHotkeyRelease(timeoutMs = 150): Promise<void> {
   const startedAt = Date.now();
 
-  while ((GetAsyncKeyState(VK_RMENU) & 0x8000) !== 0) {
+  while ((GetAsyncKeyState(currentVk) & 0x8000) !== 0) {
     if (Date.now() - startedAt >= timeoutMs) {
       return;
     }

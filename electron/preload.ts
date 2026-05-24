@@ -53,8 +53,9 @@ const api = {
   getHistory: () => ipcRenderer.invoke('history:get'),
   clearHistory: () => ipcRenderer.invoke('history:clear'),
 
-  // Translate mode
+  // Hotkey management
   setTranslateModifier: (keyName: string) => ipcRenderer.invoke('settings:set-translate-modifier', keyName),
+  setRecordingHotkey: (keyName: string) => ipcRenderer.invoke('settings:set-hotkey', keyName),
   onTranslateMode: (callback: (data: { enabled: boolean }) => void) => {
     const handler = (_event: Electron.IpcRendererEvent, data: { enabled: boolean }) => callback(data);
     ipcRenderer.on('voice:translate-mode', handler);

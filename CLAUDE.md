@@ -18,7 +18,7 @@ npm run build:main     # 仅构建主进程和 preload
 npm run electron:build # 完整构建 + electron-builder 打包
 ```
 
-开发需两个终端：`npm run dev` + `npm run electron:dev`。
+**只需一个终端**：`npm run dev` 自动启动 Vite → 等待端口就绪 → 编译主进程 → 启动 Electron。开发不再需要两个终端。
 
 ## 架构
 
@@ -72,7 +72,7 @@ electron/
 src/
 ├── App.tsx              # I18nProvider + hash 路由: / → 浮窗, #/settings → 设置, #/onboarding → 引导
 ├── env.d.ts             # window.tingmo 类型声明
-├── main.tsx             # React entry
+├── main.tsx             # React entry (createRoot)
 ├── i18n/
 │   ├── translations.ts  # 5 语言翻译字典 (~100 键)
 │   └── context.tsx      # React i18n Context + Provider + useI18n() hook
@@ -127,10 +127,20 @@ NB 风格：纯白底 `#FFF`、黑边框、橙色 `#FF5A1F` 点缀。左侧 175p
 - `.home-dur-unit` 时长单位：0.65em / opacity 0.7（今日数字 28px 时约 18px）
 - `.home-today-number` `text-align: center`
 
-## 词典
+### 设置持久化
+
+所有设置（快捷键、词典、UI 语言、LLM 配置等）自动保存到 `%APPDATA%/tingmo/data/settings.json`，500ms debounce。API Key 通过 Electron `safeStorage` (DPAPI) 单独加密存储。重启后自动恢复。
+
+## 快捷键
+
+**录音快捷键可配置**：支持右 Alt / 左 Alt / 右 Ctrl / 左 Ctrl / 右 Shift / 左 Shift 中任一键。设置界面录制快捷键后立即生效，主进程重新注册键盘钩子。
+
+**翻译修饰键可配置**：默认右 Shift，录音时同时按住修饰键触发翻译模式。
+
+## 词典系统
 
 两层生效：
-- **始终**：ASR 输出后模糊纠错（Levenshtein 编辑距离，短词容错 ≤1，长词 ≤2）
+- **始终**：ASR 输出后 Levenshtein 模糊纠错（短词容错 ≤1 编辑距离，长词 ≤2）
 - **LLM 启用时**：System Prompt 中声明专属词汇保持不修改
 
 ## LLM 润色/翻译

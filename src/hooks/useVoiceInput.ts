@@ -33,7 +33,7 @@ export function useVoiceInput() {
       });
     });
 
-    const unsub4 = (api as any).onTranslateMode?.((data: { enabled: boolean }) => {
+    const unsub4 = api.onTranslateMode?.((data: { enabled: boolean }) => {
       setTranslateMode(data.enabled);
     });
 

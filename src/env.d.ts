@@ -18,6 +18,7 @@ interface TingMoAPI {
   onTranslateMode: (cb: (data: { enabled: boolean }) => void) => () => void;
   onRefineFailed: (cb: (data: { error: string }) => void) => () => void;
   setTranslateModifier: (keyName: string) => Promise<void>;
+  setRecordingHotkey: (keyName: string) => Promise<void>;
   getStats: () => Promise<{ totalDurationMs: number; totalCharCount: number; totalSessions: number }>;
   getOverview: () => Promise<{ totalDurationMs: number; totalCharCount: number; totalSessions: number; todayDurationMs: number; todayCharCount: number; todaySessions: number; recentDays: Array<{ date: string; durationMs: number; charCount: number }> }>;
   getHistory: () => Promise<Array<{ id: string; text: string; charCount: number; timestamp: number }>>;
