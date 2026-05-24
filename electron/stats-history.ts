@@ -1,6 +1,6 @@
 import { app } from 'electron';
 import { join } from 'path';
-import { readFileSync, writeFileSync, existsSync, mkdirSync } from 'fs';
+import { readFileSync, writeFileSync, existsSync, mkdirSync, copyFileSync, unlinkSync } from 'fs';
 
 // ── Types ───────────────────────────────────────────────────────
 export interface HistoryEntry {
@@ -18,6 +18,20 @@ export interface Stats {
   totalSessions: number;
 }
 
+export interface DailyStats {
+  date: string;    // YYYY-MM-DD
+  durationMs: number;
+  charCount: number;
+  sessions: number;
+}
+
+export interface OverviewStats extends Stats {
+  todayDurationMs: number;
+  todayCharCount: number;
+  todaySessions: number;
+  recentDays: DailyStats[];
+}
+
 // ── Paths ───────────────────────────────────────────────────────
 function dataDir(): string {
   const dir = join(app.getPath('userData'), 'data');
@@ -26,7 +40,27 @@ function dataDir(): string {
 }
 
 function statsPath(): string { return join(dataDir(), 'stats.json'); }
+function dailyPath(): string { return join(dataDir(), 'daily_stats.json'); }
 function historyPath(): string { return join(dataDir(), 'history.json'); }
+
+// ── Helper ──────────────────────────────────────────────────────
+function todayKey(): string {
+  const d = new Date();
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+}
+
+function atomicWrite(filepath: string, data: unknown): void {
+  const tmp = filepath + '.tmp';
+  writeFileSync(tmp, JSON.stringify(data), 'utf-8');
+  try {
+    copyFileSync(tmp, filepath);
+    unlinkSync(tmp);
+  } catch {
+    // Fallback: direct write
+    writeFileSync(filepath, JSON.stringify(data), 'utf-8');
+    try { unlinkSync(tmp); } catch { /* ignore */ }
+  }
+}
 
 // ── Stats ───────────────────────────────────────────────────────
 let statsCache: Stats | null = null;
@@ -43,15 +77,70 @@ export function loadStats(): Stats {
 
 function saveStats(s: Stats): void {
   statsCache = s;
-  writeFileSync(statsPath(), JSON.stringify(s), 'utf-8');
+  atomicWrite(statsPath(), s);
 }
 
+// ── Daily stats ─────────────────────────────────────────────────
+let dailyCache: DailyStats[] | null = null;
+
+function loadDaily(): DailyStats[] {
+  if (dailyCache) return dailyCache;
+  try {
+    dailyCache = JSON.parse(readFileSync(dailyPath(), 'utf-8'));
+  } catch {
+    dailyCache = [];
+  }
+  return dailyCache as DailyStats[];
+}
+
+function saveDaily(d: DailyStats[]): void {
+  dailyCache = d;
+  atomicWrite(dailyPath(), d);
+}
+
+function getTodayStats(): DailyStats {
+  const key = todayKey();
+  const daily = loadDaily();
+  let today = daily.find((d) => d.date === key);
+  if (!today) {
+    today = { date: key, durationMs: 0, charCount: 0, sessions: 0 };
+    daily.push(today);
+    // Keep last 90 days
+    if (daily.length > 90) daily.splice(0, daily.length - 90);
+    saveDaily(daily);
+  }
+  return today;
+}
+
+// ── Overview ────────────────────────────────────────────────────
+export function loadOverview(): OverviewStats {
+  const total = loadStats();
+  const today = getTodayStats();
+  const daily = loadDaily();
+  return {
+    ...total,
+    todayDurationMs: today.durationMs,
+    todayCharCount: today.charCount,
+    todaySessions: today.sessions,
+    recentDays: daily.slice(-7).reverse(), // last 7 days, newest first
+  };
+}
+
+// ── Recording ───────────────────────────────────────────────────
 export function addRecordingStats(durationMs: number, charCount: number): void {
+  // Total
   const s = loadStats();
   s.totalDurationMs += durationMs;
   s.totalCharCount += charCount;
   s.totalSessions += 1;
   saveStats(s);
+
+  // Today
+  const today = getTodayStats();
+  today.durationMs += durationMs;
+  today.charCount += charCount;
+  today.sessions += 1;
+  saveDaily(loadDaily());
 }
 
 // ── History ─────────────────────────────────────────────────────
@@ -69,7 +158,7 @@ export function loadHistory(): HistoryEntry[] {
 
 function saveHistory(h: HistoryEntry[]): void {
   historyCache = h;
-  writeFileSync(historyPath(), JSON.stringify(h), 'utf-8');
+  atomicWrite(historyPath(), h);
 }
 
 export function addHistoryEntry(text: string, charCount: number, originalText?: string, provider?: string | null): HistoryEntry {
@@ -82,8 +171,7 @@ export function addHistoryEntry(text: string, charCount: number, originalText?: 
     ...(provider ? { provider } : {}),
   };
   const h = loadHistory();
-  h.unshift(entry); // newest first
-  // Keep last 200 entries
+  h.unshift(entry);
   if (h.length > 200) h.length = 200;
   saveHistory(h);
   return entry;

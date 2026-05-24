@@ -1,4 +1,4 @@
-appId: com.tingmo.app
+appId: com.TingMo.app
 productName: TingMo
 copyright: Copyright © 2025
 directories:
@@ -7,16 +7,28 @@ directories:
 files:
   - dist
   - dist-electron
-  - assets
-  - node_modules
   - package.json
-asar: false
+asar: true
+extraResources:
+  - from: assets/models
+    to: models
+asarUnpack:
+  - node_modules/onnxruntime-node/**
+  - node_modules/koffi/**
+  - node_modules/sherpa-onnx/**
+publish:
+  provider: github
+  owner: shaoxin12
+  repo: tingmo
 win:
   target:
     - target: nsis
       arch:
         - x64
   icon: assets/icons/icon.ico
+  # Code signing — set CSC_LINK and CSC_KEY_PASSWORD env vars or configure here
+  # certificateFile: path/to/cert.pfx
+  # certificatePassword: your-password
 nsis:
   oneClick: false
   perMachine: false
@@ -24,4 +36,4 @@ nsis:
   createDesktopShortcut: true
   createStartMenuShortcut: true
   shortcutName: TingMo
-  artifactName: "TingMo-Setup-0.2.${ext}"
+  artifactName: "TingMo-Setup-${version}.${ext}"

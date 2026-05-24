@@ -2,6 +2,9 @@ const koffi = require('koffi');
 
 import {
   VK_RMENU,
+  VK_ESCAPE,
+  KEY_DOWN_MESSAGES,
+  KEY_UP_MESSAGES,
   getRightAltEventAction,
 } from './hotkey-events';
 
@@ -10,6 +13,7 @@ const kernel32 = koffi.load('kernel32.dll');
 
 const WH_KEYBOARD_LL = 13;
 const HC_ACTION = 0;
+const LLKHF_INJECTED = 0x10;
 
 const KBDLLHOOKSTRUCT = koffi.struct('KBDLLHOOKSTRUCT', {
   vkCode: 'uint32',
@@ -37,13 +41,34 @@ const UnhookWindowsHookEx = user32.func('UnhookWindowsHookEx', 'bool', ['void *'
 const GetAsyncKeyState = user32.func('GetAsyncKeyState', 'int16', ['int32']);
 const GetModuleHandleW = kernel32.func('GetModuleHandleW', 'void *', ['str16']);
 
-let callback: ((pressed: boolean) => void) | null = null;
+// ── Synthetic key-up injection to prevent stuck-key ──────────
+// keybd_event is simpler than SendInput (no struct layout issues) and
+// still marks events as LLKHF_INJECTED so our hook passes them through.
+const KEYEVENTF_KEYUP = 0x0002;
+const keybd_event = user32.func('keybd_event', 'void', ['uint8', 'uint8', 'uint32', 'uintptr']);
+
+function injectAltKeyUp(): void {
+  keybd_event(VK_RMENU, 0, KEYEVENTF_KEYUP, 0);
+}
+
+let pressCallback: (() => void) | null = null;
+let releaseCallback: (() => void) | null = null;
+let escCallback: (() => void) | null = null;
 let hookHandle: unknown = null;
 let hookProc: unknown = null;
 let wasPressed = false;
+let wasEscPressed = false;
 
 export function setHotkeyCallback(cb: (pressed: boolean) => void): void {
-  callback = cb;
+  pressCallback = () => cb(true);
+}
+
+export function setHotkeyReleaseCallback(cb: () => void): void {
+  releaseCallback = cb;
+}
+
+export function setEscCallback(cb: () => void): void {
+  escCallback = cb;
 }
 
 export function startHotkey(): void {
@@ -55,6 +80,12 @@ export function startHotkey(): void {
         ? koffi.decode(lParam, KBDLLHOOKSTRUCT)
         : null;
 
+      // Pass through injected events — these are our synthetic key-ups
+      if (event && (event.flags & LLKHF_INJECTED)) {
+        return CallNextHookEx(hookHandle, nCode, wParam, lParam);
+      }
+
+      // Right Alt handling
       const action = getRightAltEventAction({
         nCode,
         message: Number(wParam),
@@ -64,11 +95,28 @@ export function startHotkey(): void {
 
       wasPressed = action.nextWasPressed;
       if (action.triggerPressed) {
-        callback?.(true);
+        pressCallback?.();
+        // Inject synthetic key-up so Windows doesn't think Alt is stuck.
+        // The injected event has LLKHF_INJECTED set → our hook passes it through.
+        injectAltKeyUp();
       }
+      if (action.triggerReleased) releaseCallback?.();
 
       if (action.consume) {
         return 1;
+      }
+
+      // Esc key handling — detect but don't consume
+      if (nCode === HC_ACTION && event?.vkCode === VK_ESCAPE) {
+        const msg = Number(wParam);
+        if (KEY_DOWN_MESSAGES.has(msg)) {
+          if (!wasEscPressed) {
+            wasEscPressed = true;
+            escCallback?.();
+          }
+        } else if (KEY_UP_MESSAGES.has(msg)) {
+          wasEscPressed = false;
+        }
       }
     } catch (err) {
       console.error('[Hotkey] Keyboard hook error:', err);
@@ -83,7 +131,7 @@ export function startHotkey(): void {
   if (!hookHandle) {
     koffi.unregister(hookProc);
     hookProc = null;
-    throw new Error('Failed to install right Alt keyboard hook');
+    throw new Error('Failed to install keyboard hook');
   }
 }
 
@@ -99,15 +147,16 @@ export function stopHotkey(): void {
   }
 
   wasPressed = false;
+  wasEscPressed = false;
 }
 
-export async function waitForHotkeyRelease(timeoutMs = 1200): Promise<void> {
+export async function waitForHotkeyRelease(timeoutMs = 150): Promise<void> {
   const startedAt = Date.now();
 
   while ((GetAsyncKeyState(VK_RMENU) & 0x8000) !== 0) {
     if (Date.now() - startedAt >= timeoutMs) {
       return;
     }
-    await new Promise((resolve) => setTimeout(resolve, 10));
+    await new Promise((resolve) => setTimeout(resolve, 8));
   }
 }

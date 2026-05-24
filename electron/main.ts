@@ -1,20 +1,23 @@
 import { app, BrowserWindow, ipcMain, session, Tray } from 'electron';
+import { autoUpdater } from 'electron-updater';
 import { join } from 'path';
 import { createTray, updateTrayState, updateTrayLanguage } from './tray';
-import { startHotkey, stopHotkey, setHotkeyCallback, waitForHotkeyRelease } from './hotkey';
+import { startHotkey, stopHotkey, setHotkeyCallback, setHotkeyReleaseCallback, setEscCallback, waitForHotkeyRelease } from './hotkey';
 import { injectText } from './text-inserter';
 import { ensureModel } from '../src/services/model-downloader';
 import { duckSystemAudio, unduckSystemAudio } from './audio-ducking';
-import { addRecordingStats, addHistoryEntry, loadStats, loadHistory, clearHistory } from './stats-history';
+import { addRecordingStats, addHistoryEntry, loadStats, loadHistory, clearHistory, loadOverview } from './stats-history';
 
 // Single instance lock — prevent double tray icon
-const gotTheLock = app.requestSingleInstanceLock();
+let gotTheLock = false;
+if (app) {
+  gotTheLock = app.requestSingleInstanceLock();
+}
 
 if (!gotTheLock) {
-  app.quit();
+  if (app) app.quit();
 } else {
   app.on('second-instance', () => {
-    // User tried to launch a second instance — show the existing window
     if (settingsWindow && !settingsWindow.isDestroyed()) {
       if (settingsWindow.isMinimized()) settingsWindow.restore();
       settingsWindow.show();
@@ -29,14 +32,18 @@ const koffi = require('koffi');
 
 // Strip DWM shadow/border from transparent frameless window
 function stripDwmFrame(win: BrowserWindow): void {
-  const dwmapi = koffi.load('dwmapi.dll');
-  const DwmSetWindowAttribute = dwmapi.func(
-    'DwmSetWindowAttribute', 'int32', ['void*', 'uint32', 'void*', 'uint32'],
-  );
-  const hwnd = koffi.as(win.getNativeWindowHandle(), 'void*');
-  const policy = Buffer.alloc(4);
-  policy.writeInt32LE(1, 0); // DWMNCRP_DISABLED = 1
-  DwmSetWindowAttribute(hwnd, 2, koffi.as(policy, 'void*'), 4); // DWMWA_NCRENDERING_POLICY = 2
+  try {
+    const dwmapi = koffi.load('dwmapi.dll');
+    const DwmSetWindowAttribute = dwmapi.func(
+      'DwmSetWindowAttribute', 'int32', ['void*', 'uint32', 'void*', 'uint32'],
+    );
+    const hwnd = koffi.as(win.getNativeWindowHandle(), 'void*');
+
+    // Disable non-client rendering (removes DWM border/shadow)
+    const policy = Buffer.alloc(4);
+    policy.writeInt32LE(2, 0); // DWMNCRP_DISABLED = 2 (was 1, try 2 for more aggressive)
+    DwmSetWindowAttribute(hwnd, 2, koffi.as(policy, 'void*'), 4); // DWMWA_NCRENDERING_POLICY = 2
+  } catch { /* ignore */ }
 }
 
 let floatingWindow: BrowserWindow | null = null;
@@ -47,22 +54,48 @@ let tray: Tray | null = null;
 type VoiceState = 'idle' | 'recording' | 'recognizing' | 'refining' | 'success' | 'error';
 
 let currentState: VoiceState = 'idle';
-let floatingPosition: { x: number; y: number } | null = null;
 let floatingReady = false;
 let pendingState: VoiceState | null = null;
 let autoDismissTimer: ReturnType<typeof setTimeout> | null = null;
 let recordingStartedAt: number = 0;
 let translateMode: boolean = false;
 let translateModifierVK: number = 0xA1; // default: VK_RSHIFT
+let recordMode: 'toggle' | 'hold' = 'toggle';
+
+function getDataPath(filename: string): string {
+  return join(app.getPath('userData'), 'data', filename);
+}
+
+function readJSON<T>(filepath: string, fallback: T): T {
+  try {
+    const fs = require('fs');
+    if (fs.existsSync(filepath)) {
+      return JSON.parse(fs.readFileSync(filepath, 'utf-8'));
+    }
+  } catch { /* ignore */ }
+  return fallback;
+}
+
+function writeJSON(filepath: string, data: unknown): void {
+  const fs = require('fs');
+  const dir = join(app.getPath('userData'), 'data');
+  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(filepath, JSON.stringify(data, null, 2));
+}
+
+function loadRecordMode(): 'toggle' | 'hold' {
+  const settings = readJSON<any>(getDataPath('settings.json'), {});
+  return settings.recordMode || 'toggle';
+}
 
 // Key name → VK code mapping for translate modifier
 const MODIFIER_VK_MAP: Record<string, number> = {
-  '右 Shift': 0xA1, 'Right Shift': 0xA1,
-  '右 Ctrl': 0xA3, 'Right Ctrl': 0xA3,
-  '左 Shift': 0xA0, 'Left Shift': 0xA0,
-  '左 Ctrl': 0xA2, 'Left Ctrl': 0xA2,
-  '右 Alt': 0xA5, 'Right Alt': 0xA5,
-  '左 Alt': 0xA4, 'Left Alt': 0xA4,
+  '右 Shift': 0xA1, 'Right Shift': 0xA1, '오른쪽 Shift': 0xA1,
+  '右 Ctrl': 0xA3, 'Right Ctrl': 0xA3, '오른쪽 Ctrl': 0xA3,
+  '左 Shift': 0xA0, 'Left Shift': 0xA0, '왼쪽 Shift': 0xA0,
+  '左 Ctrl': 0xA2, 'Left Ctrl': 0xA2, '왼쪽 Ctrl': 0xA2,
+  '右 Alt': 0xA5, 'Right Alt': 0xA5, '오른쪽 Alt': 0xA5,
+  '左 Alt': 0xA4, 'Left Alt': 0xA4, '왼쪽 Alt': 0xA4,
 };
 
 function clearAutoDismiss(): void {
@@ -92,23 +125,53 @@ async function initRecognition(): Promise<void> {
 
     if (provider === 'cloud') {
       const { FunASRCloudProvider } = require('../src/services/funasr-cloud');
-      recognitionProvider = new FunASRCloudProvider('', '');
+
+      // Read API credentials for cloud ASR
+      let apiKey = '';
+      let baseUrl = 'https://api.openai.com/v1';
+      let model = 'whisper-1';
+      try {
+        const settingsPath = join(app.getPath('userData'), 'data', 'llm-settings.json');
+        if (fs.existsSync(settingsPath)) {
+          const settings = JSON.parse(fs.readFileSync(settingsPath, 'utf-8'));
+          model = settings.cloudAsrModel || 'whisper-1';
+          baseUrl = settings.llmBaseUrl || baseUrl;
+        }
+        const apiKeyPath = join(app.getPath('userData'), 'data', 'apikey.enc');
+        if (fs.existsSync(apiKeyPath)) {
+          try {
+            const encrypted = fs.readFileSync(apiKeyPath);
+            apiKey = require('electron').safeStorage.decryptString(encrypted);
+          } catch { /* key not decryptable */ }
+        }
+      } catch { /* use defaults */ }
+
+      recognitionProvider = new FunASRCloudProvider(apiKey, baseUrl, model);
       recognitionReady = await recognitionProvider.initialize();
       console.log('[Main] Recognition ready (cloud):', recognitionReady);
     } else {
-      const { FunASRORTProvider } = require('../src/services/funasr-ort');
+      const { SherpaASRProvider } = require('../src/services/funasr-sherpa');
 
-      const modelDir = join(app.getPath('userData'), 'models');
-      const funasrDir = join(modelDir, 'funasr');
-      const modelPath = join(funasrDir, 'paraformer-large-int8.onnx');
+      // 1. Bundled model (resources/models) — installed with the app
+      // 2. Downloaded model (userData/models/funasr) — fallback / dev
+      let funasrDir: string;
+      const bundledDir = join(process.resourcesPath || '', 'models');
+      const bundledModel = join(bundledDir, 'model.int8.onnx');
+      const userModelDir = join(app.getPath('userData'), 'models', 'funasr');
+      const userModel = join(userModelDir, 'model.int8.onnx');
 
-      // Download model on first launch if missing
-      if (!fs.existsSync(modelPath)) {
-        await downloadModel(modelDir);
+      if (fs.existsSync(bundledModel)) {
+        funasrDir = bundledDir;
+      } else if (fs.existsSync(userModel)) {
+        funasrDir = userModelDir;
+      } else {
+        // Neither bundled nor previously downloaded — download now
+        await downloadModel(join(app.getPath('userData'), 'models'));
+        funasrDir = join(app.getPath('userData'), 'models', 'funasr');
       }
 
-      console.log('[Main] Loading Paraformer model from:', modelPath);
-      recognitionProvider = new FunASRORTProvider(funasrDir);
+      console.log('[Main] Loading SenseVoice model via sherpa-onnx from:', funasrDir);
+      recognitionProvider = new SherpaASRProvider(funasrDir);
       recognitionReady = await recognitionProvider.initialize();
       console.log('[Main] Recognition ready (local):', recognitionReady);
     }
@@ -118,7 +181,7 @@ async function initRecognition(): Promise<void> {
   }
 }
 
-// Refinement provider (LLM) — lazy init
+// LLM provider — used for both refinement and translation
 let refinementProvider: any = null;
 let refinementReady = false;
 
@@ -128,7 +191,6 @@ async function initRefinement(): Promise<void> {
     const fs = require('fs');
     const apiKeyPath = join(app.getPath('userData'), 'data', 'apikey.enc');
 
-    // Read encrypted API key
     let apiKey = '';
     if (fs.existsSync(apiKeyPath)) {
       try {
@@ -137,32 +199,30 @@ async function initRefinement(): Promise<void> {
       } catch { /* key not decryptable */ }
     }
 
-    // Read settings for model/baseUrl
     const settingsPath = join(app.getPath('userData'), 'data', 'llm-settings.json');
     let model = 'gpt-4o-mini';
     let baseUrl = 'https://api.openai.com/v1';
-    let refineEnabled = false;
     if (fs.existsSync(settingsPath)) {
       try {
         const settings = JSON.parse(fs.readFileSync(settingsPath, 'utf-8'));
         model = settings.llmModel || model;
         baseUrl = settings.llmBaseUrl || baseUrl;
-        refineEnabled = settings.refineEnabled ?? false;
       } catch { /* ignore */ }
     }
 
-    if (apiKey && refineEnabled) {
+    // Provider is created whenever an API key exists — refineEnabled only
+    // controls whether auto-refinement runs; translation always uses this.
+    if (apiKey) {
       const { OpenAIProvider } = require('../src/services/llm-openai');
       refinementProvider = new OpenAIProvider({ apiKey, model, baseUrl });
       refinementReady = true;
-      console.log('[Main] Refinement ready:', model);
+      console.log('[Main] LLM ready:', model);
     } else {
       refinementProvider = null;
       refinementReady = false;
-      console.log('[Main] Refinement disabled (no API key or turned off)');
     }
   } catch (err: any) {
-    console.error('[Main] Failed to init refinement:', err.message);
+    console.error('[Main] Failed to init LLM:', err.message);
     refinementProvider = null;
     refinementReady = false;
   }
@@ -248,12 +308,15 @@ function createDownloadWindow(): BrowserWindow {
     <div id="bar" style="width:280px;height:6px;background:#eee;margin:0 auto">
     <div id="fill" style="width:0%;height:100%;background:#000"></div></div></div>
     <script>
-    window.tingmo.onModelProgress(function(p) {
-      document.getElementById('msg').textContent =
-        p.stage==='downloading'?'下载模型 '+p.percent+'%':
-        p.stage==='extracting'?'解压中...':'';
-      document.getElementById('fill').style.width=p.percent+'%';
-    });
+    try {
+      window.tingmo && window.tingmo.onModelProgress(function(p) {
+        var m=document.getElementById('msg');
+        var f=document.getElementById('fill');
+        if(!m||!f)return;
+        m.textContent=p.stage==='downloading'?'下载模型 '+p.percent+'%':p.stage==='extracting'?'解压中...':'';
+        f.style.width=p.percent+'%';
+      });
+    } catch(e) {}
     </script></body></html>`);
   return win;
 }
@@ -296,9 +359,10 @@ async function downloadModel(modelDir: string): Promise<void> {
 
 function createFloatingWindow(): BrowserWindow {
   const win = new BrowserWindow({
-    width: 140,
-    height: 48,
+    width: 160,
+    height: 44,
     transparent: true,
+    backgroundColor: '#00000000',
     frame: false,
     alwaysOnTop: true,
     skipTaskbar: true,
@@ -312,26 +376,26 @@ function createFloatingWindow(): BrowserWindow {
     },
   });
 
+  win.setBackgroundColor('#00000000');
   win.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true });
   stripDwmFrame(win);
+
+  // Ensure web contents also has no background
+  win.webContents.on('did-finish-load', () => {
+    win?.webContents.insertCSS('html,body,#root{background:transparent !important}');
+  });
   floatingReady = false;
 
-  if (floatingPosition) {
-    win.setPosition(floatingPosition.x, floatingPosition.y);
-  } else {
-    const { screen } = require('electron');
-    const primaryDisplay = screen.getPrimaryDisplay();
-    const { width, height } = primaryDisplay.workAreaSize;
-    win.setPosition(Math.round((width - 140) / 2), height - 56);
-  }
-
-  win.on('moved', () => {
-    const [x, y] = win.getPosition();
-    floatingPosition = { x, y };
-  });
+  // Always position from screen geometry — never use cached floatingPosition,
+  // and don't listen for moved events (DWM adjustments cause drift).
+  positionOnActiveDisplay(win);
 
   win.webContents.on('did-finish-load', () => {
     floatingReady = true;
+    if (pendingTranslateMode !== null) {
+      win.webContents.send('voice:translate-mode', { enabled: pendingTranslateMode });
+      pendingTranslateMode = null;
+    }
     if (pendingState) {
       win.webContents.send('voice:state-change', { state: pendingState });
       pendingState = null;
@@ -347,11 +411,38 @@ function createFloatingWindow(): BrowserWindow {
   return win;
 }
 
+function getCursorDisplay(): Electron.Display {
+  const { screen } = require('electron');
+  return screen.getDisplayNearestPoint(screen.getCursorScreenPoint());
+}
+
+// Position the floating window centered just above the taskbar.
+// Uses screen bounds (stable, never changes) minus workArea (to measure
+// taskbar height).  setBounds is used instead of setPosition — it sets
+// both position AND size atomically, preventing DWM from applying subtle
+// size adjustments that shift the window.
+function positionOnActiveDisplay(win: BrowserWindow): void {
+  const d = getCursorDisplay();
+  const bounds = d.bounds;
+  const wa = d.workArea;
+  const taskbarH = (bounds.y + bounds.height) - (wa.y + wa.height);
+  const x = Math.round(bounds.x + (bounds.width - 160) / 2);
+  const y = bounds.y + bounds.height - taskbarH - 44 - 6;
+  win.setBounds({ x, y, width: 160, height: 44 });
+}
+
 function showFloatingWindow(): void {
   if (!floatingWindow || floatingWindow.isDestroyed()) {
     floatingWindow = createFloatingWindow();
   }
+  positionOnActiveDisplay(floatingWindow);
   floatingWindow.showInactive();
+  // Override any DWM async adjustment after show
+  setImmediate(() => {
+    if (floatingWindow && !floatingWindow.isDestroyed()) {
+      positionOnActiveDisplay(floatingWindow);
+    }
+  });
 }
 
 function hideFloatingWindow(): void {
@@ -360,12 +451,16 @@ function hideFloatingWindow(): void {
   }
 }
 
+let pendingTranslateMode: boolean | null = null;
+
 function sendToRenderer(channel: string, data?: unknown): void {
   if (!floatingWindow || floatingWindow.isDestroyed()) return;
   if (floatingReady) {
     floatingWindow.webContents.send(channel, data);
   } else if (channel === 'voice:state-change') {
     pendingState = (data as { state: VoiceState }).state;
+  } else if (channel === 'voice:translate-mode') {
+    pendingTranslateMode = (data as { enabled: boolean }).enabled;
   }
 }
 
@@ -393,7 +488,7 @@ function setVoiceState(state: VoiceState): void {
   }
 }
 
-function createSettingsWindow(): void {
+function createSettingsWindow(showOnboarding = false): void {
   if (settingsWindow && !settingsWindow.isDestroyed()) {
     settingsWindow.focus();
     return;
@@ -403,7 +498,7 @@ function createSettingsWindow(): void {
     width: 900,
     height: 600,
     minWidth: 900,
-    minHeight: 600,
+    minHeight: 660,
     resizable: true,
     title: 'TINGMO · 设置',
     autoHideMenuBar: true,
@@ -414,10 +509,11 @@ function createSettingsWindow(): void {
     },
   });
 
+  const hash = showOnboarding ? '/onboarding' : '/settings';
   if (process.env.NODE_ENV === 'development') {
-    settingsWindow.loadURL('http://localhost:5173/#/settings');
+    settingsWindow.loadURL('http://localhost:5173/#' + hash);
   } else {
-    settingsWindow.loadFile(join(__dirname, '../dist/index.html'), { hash: '/settings' });
+    settingsWindow.loadFile(join(__dirname, '../dist/index.html'), { hash });
   }
 
   settingsWindow.on('closed', () => {
@@ -425,28 +521,47 @@ function createSettingsWindow(): void {
   });
 }
 
-// ── Hotkey callback ──────────────────────────────────────────
-setHotkeyCallback(async (pressed: boolean) => {
-  if (!pressed) return;
+// ── Hotkey callbacks ──────────────────────────────────────
 
+function handleHotkeyPress(): void {
   clearAutoDismiss();
 
   // Detect translate modifier key for translation mode
   const user32 = koffi.load('user32.dll');
   const GetAsyncKeyState = user32.func('GetAsyncKeyState', 'int16', ['int32']);
   const modifierDown = (GetAsyncKeyState(translateModifierVK) & 0x8000) !== 0;
-  if (modifierDown && currentState === 'idle') {
-    translateMode = true;
+
+  // Reset sticky translateMode when starting a new recording without modifier
+  if (currentState === 'idle') {
+    translateMode = modifierDown;
   }
 
-  switch (currentState) {
-    case 'idle': {
+  if (recordMode === 'hold') {
+    // Hold mode: press to start recording, release to stop
+    if (currentState === 'idle') {
       showFloatingWindow();
-      setVoiceState('recording');
-      // Send translate mode to renderer
       if (translateMode) {
         sendToRenderer('voice:translate-mode', { enabled: true });
       }
+      setVoiceState('recording');
+    } else if (currentState === 'error' || currentState === 'success') {
+      hideFloatingWindow();
+      setVoiceState('idle');
+      translateMode = false;
+    }
+    return;
+  }
+
+  // Toggle mode: each press toggles state
+  switch (currentState) {
+    case 'idle': {
+      showFloatingWindow();
+      // Send translate-mode BEFORE voice-state so the renderer knows
+      // it's a translation recording before it starts capturing audio.
+      if (translateMode) {
+        sendToRenderer('voice:translate-mode', { enabled: true });
+      }
+      setVoiceState('recording');
       break;
     }
     case 'recording': {
@@ -455,17 +570,50 @@ setHotkeyCallback(async (pressed: boolean) => {
     }
     case 'error':
     case 'success': {
-      // Dismiss floating window, go back to idle
       hideFloatingWindow();
       setVoiceState('idle');
       translateMode = false;
       break;
     }
   }
-});
+}
 
-// ── App Lifecycle ────────────────────────────────────────────
-app.whenReady().then(async () => {
+function handleHotkeyRelease(): void {
+  if (recordMode === 'hold' && currentState === 'recording') {
+    setVoiceState('recognizing');
+  }
+}
+
+function handleEscPress(): void {
+  if (currentState !== 'idle') {
+    console.log('[Main] Esc pressed — cancelling');
+    clearAutoDismiss();
+    hideFloatingWindow();
+    setVoiceState('idle');
+    translateMode = false;
+    sendToRenderer('voice:state-change', { state: 'idle' });
+  }
+}
+
+setHotkeyCallback(() => handleHotkeyPress());
+setHotkeyReleaseCallback(() => handleHotkeyRelease());
+setEscCallback(() => handleEscPress());
+
+// App Lifecycle
+if (app) {
+  app.whenReady().then(async () => {
+  // Migrate data from old "tingmo" dir to "TingMo" (package.json name was lowercased)
+  try {
+    const fs = require('fs');
+    const path = require('path');
+    const oldDir = path.join(app.getPath('appData'), 'tingmo');
+    const newDir = app.getPath('userData');
+    if (oldDir !== newDir && fs.existsSync(oldDir) && !fs.existsSync(path.join(newDir, 'data'))) {
+      console.log('[Main] Migrating data from', oldDir, 'to', newDir);
+      fs.cpSync(oldDir, newDir, { recursive: true });
+    }
+  } catch { /* ignore */ }
+
   session.defaultSession.setPermissionRequestHandler((_webContents, permission, callback) => {
     callback(permission === 'media');
   });
@@ -478,7 +626,30 @@ app.whenReady().then(async () => {
     createSettingsWindow();
   });
 
+  // ── App settings persistence ──────────────────────────
+  ipcMain.handle('settings:load-app-settings', () => {
+    return readJSON<any>(getDataPath('settings.json'), {});
+  });
+
+  ipcMain.handle('settings:save-app-settings', (_event, settings: Record<string, unknown>) => {
+    try {
+      const filepath = getDataPath('settings.json');
+      const existing = readJSON<any>(filepath, {});
+      Object.assign(existing, settings);
+      writeJSON(filepath, existing);
+      if (typeof settings.recordMode === 'string') {
+        recordMode = (settings as any).recordMode;
+      }
+      if (typeof settings.launchAtStartup === 'boolean') {
+        app.setLoginItemSettings({ openAtLogin: settings.launchAtStartup as boolean });
+      }
+    } catch (err: any) {
+      console.error('[Main] Failed to save settings:', err.message);
+    }
+  });
+
   ipcMain.handle('stats:get', () => loadStats());
+  ipcMain.handle('stats:overview', () => loadOverview());
   ipcMain.handle('history:get', () => loadHistory());
   ipcMain.handle('history:clear', () => { clearHistory(); });
   ipcMain.handle('settings:set-translate-modifier', (_event, keyName: string) => {
@@ -565,33 +736,60 @@ app.whenReady().then(async () => {
   ipcMain.handle('voice:cancel-recording', () => {
     hideFloatingWindow();
     setVoiceState('idle');
+    translateMode = false;
   });
 
   ipcMain.handle('voice:capture-error', (_event, message: string) => {
     console.error('[Main] Audio capture error:', message);
-    setVoiceState('error');
-    sendToRenderer('voice:inject-failed', { text: message });
+    setVoiceState('idle');
   });
 
   // Audio transcription from renderer
   ipcMain.handle('voice:transcribe', async (_event, audioBuffer: ArrayBuffer, language?: string, options?: {
     translate?: boolean; translateTarget?: string; dictionary?: Array<{word: string; replace: string}>;
+    polishMode?: string; customPrompt?: string;
   }) => {
     try {
       console.log('[Main] Transcribe: buffer =', audioBuffer.byteLength, 'bytes, lang =', language);
       const buf = Buffer.from(audioBuffer);
       let text: string;
 
+      // Start key-release wait now — runs in parallel with ASR
+      const releasePromise = waitForHotkeyRelease(150);
+
+      // Debug WAV save — non-blocking, off the critical path
+      setImmediate(() => {
+        try {
+          const fs = require('fs');
+          const debugDir = join(process.env.APPDATA || '', 'TingMo', 'debug_recordings');
+          if (!fs.existsSync(debugDir)) fs.mkdirSync(debugDir, { recursive: true });
+          fs.writeFileSync(join(debugDir, `tingmo_${Date.now()}.wav`), buf);
+        } catch { /* ignore */ }
+      });
+
       if (recognitionReady && recognitionProvider) {
-        console.log('[Main] Running Paraformer...');
+        console.log('[Main] Running ASR...');
         const result = await recognitionProvider.transcribe(buf, 16000, language);
         text = result.text;
-        console.log('[Main] Paraformer result:', text);
+        console.log('[Main] ASR result:', text);
+
+        // Filter silence hallucinations — SenseVoice outputs spurious words for near-silent input
+        const stripped = text.replace(/[，。？、！，,.\s　]/g, '').trim();
+        const HALLUCINATIONS = new Set([
+          'yeah', 'yeah.', 'yeah。', 'Yeah', 'Yeah.',
+          'um', 'Um', 'uh', 'Uh', 'hmm', 'Hmm',
+          '嗯', '嗯。', '啊', '啊。', '哦', '哦。',
+          '.', '。', '...', '……',
+        ]);
+        if (stripped.length < 2 || HALLUCINATIONS.has(text.trim())) {
+          console.log('[Main] Silence hallucination filtered:', text);
+          setVoiceState('idle');
+          hideFloatingWindow();
+          translateMode = false;
+          return;
+        }
       } else {
-        // Fallback to mock if model not ready
-        console.log('[Main] Using mock (model not ready)');
-        await new Promise(r => setTimeout(r, 300));
-        text = '这是一段测试文本，通过听墨语音输入法识别。';
+        throw new Error('ASR model not loaded. Please check model files or switch to cloud ASR.');
       }
 
       // Dictionary fuzzy correction — always runs, offline or online
@@ -600,9 +798,19 @@ app.whenReady().then(async () => {
         console.log('[Main] After dictionary:', text.slice(0, 80));
       }
 
-      // LLM Refinement — remove filler words, auto-structure, dictionary-aware
+      // Check if auto-refinement is enabled in settings
+      let refineEnabled = false;
+      try {
+        const fs = require('fs');
+        const settingsPath = join(app.getPath('userData'), 'data', 'llm-settings.json');
+        if (fs.existsSync(settingsPath)) {
+          refineEnabled = JSON.parse(fs.readFileSync(settingsPath, 'utf-8')).refineEnabled ?? false;
+        }
+      } catch { /* use default */ }
+
+      // LLM Refinement — only if enabled AND not translating
       let originalText = text;
-      if (refinementReady && refinementProvider && text.trim().length > 0 && !options?.translate) {
+      if (refineEnabled && refinementReady && refinementProvider && text.trim().length > 0 && !options?.translate) {
         const online = await isNetworkAvailable();
         if (online) {
           try {
@@ -610,18 +818,21 @@ app.whenReady().then(async () => {
             const result = await refinementProvider.refine(text, {
               language,
               dictionary: options?.dictionary ?? [],
+              polishMode: (options as any)?.polishMode || 'structured',
+              customPrompt: (options as any)?.customPrompt || '',
             });
             text = result.refinedText;
             console.log('[Main] Refined:', text.slice(0, 80));
           } catch (err: any) {
             console.error('[Main] Refine failed, using raw ASR:', err.message);
+            sendToRenderer('voice:refine-failed', { error: err.message });
           }
         } else {
           console.log('[Main] Offline — skipping refinement');
         }
       }
 
-      // LLM Translation
+      // LLM Translation — uses same provider as refinement, different prompt
       if (options?.translate && text.trim()) {
         const target = options.translateTarget || 'en';
         console.log('[Main] Translating to', target, ':', text.slice(0, 40));
@@ -645,54 +856,39 @@ app.whenReady().then(async () => {
             text = `[${target.toUpperCase()}] ${text}`;
           }
         } else {
+          console.log('[Main] No LLM provider — prepending language tag');
           text = `[${target.toUpperCase()}] ${text}`;
         }
       }
 
       console.log('[Main] Injecting text:', text.slice(0, 40));
-      await waitForHotkeyRelease();
+      await releasePromise;
+
       const injectResult = await injectText(text);
-      if (injectResult.success) {
-        const durationMs = Date.now() - recordingStartedAt;
-        addRecordingStats(durationMs, text.length);
-        addHistoryEntry(text, text.length, originalText, refinementProvider?.name || null);
-        setVoiceState('success');
-        sendToRenderer('voice:recognition-done', {
-          charCount: injectResult.charCount,
-          durationMs: injectResult.durationMs,
-        });
-        autoDismissTimer = setTimeout(() => {
-          hideFloatingWindow();
-          setVoiceState('idle');
-        }, 1500);
-      } else {
-        setVoiceState('error');
-        sendToRenderer('voice:inject-failed', { text });
-      }
+      const durationMs = Date.now() - recordingStartedAt;
+      addRecordingStats(durationMs, text.length);
+      addHistoryEntry(text, text.length, originalText, refinementProvider?.name || null);
+
+      setVoiceState('success');
+      sendToRenderer('voice:recognition-done', { charCount: injectResult.charCount, durationMs: injectResult.durationMs });
     } catch (err: any) {
       console.error('[Main] Transcription error:', err.message);
-      setVoiceState('error');
-      autoDismissTimer = setTimeout(() => {
-        hideFloatingWindow();
-        setVoiceState('idle');
-      }, 2000);
+      setVoiceState('idle');
     }
   });
 
-  ipcMain.handle('voice:retry-inject', async (_event, text: string) => {
-    const result = await injectText(text);
-    if (result.success) {
-      setVoiceState('success');
-      sendToRenderer('voice:recognition-done', {
-        charCount: result.charCount,
-        durationMs: result.durationMs,
-      });
-      autoDismissTimer = setTimeout(() => {
-        hideFloatingWindow();
-        setVoiceState('idle');
-      }, 1500);
+
+  // DEBUG: save WAV for testing
+  ipcMain.handle('debug:save-wav', async (_event, buffer: ArrayBuffer, filename: string) => {
+    try {
+      const fs = require('fs');
+      const dir = join(app.getPath('userData'), 'debug_recordings');
+      if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(join(dir, filename), Buffer.from(buffer));
+      console.log('[Debug] Saved:', join(dir, filename), 'size:', buffer.byteLength);
+    } catch (err: any) {
+      console.error('[Debug] Save failed:', err.message);
     }
-    return result;
   });
 
   ipcMain.handle('voice:copy-text', async (_event, text: string) => {
@@ -700,25 +896,114 @@ app.whenReady().then(async () => {
     clipboard.writeText(text);
   });
 
+  // ── Auto-update ─────────────────────────────────────
+  if (!process.env.NODE_ENV || process.env.NODE_ENV !== 'development') {
+    autoUpdater.logger = console;
+    autoUpdater.autoDownload = false;
+
+    autoUpdater.on('update-available', (info) => {
+      console.log('[Updater] Update available:', info.version);
+      if (floatingWindow && !floatingWindow.isDestroyed()) {
+        floatingWindow.webContents.send('update:available', { version: info.version });
+      }
+      if (settingsWindow && !settingsWindow.isDestroyed()) {
+        settingsWindow.webContents.send('update:available', { version: info.version });
+      }
+    });
+
+    autoUpdater.on('update-not-available', () => {
+      console.log('[Updater] No update available');
+    });
+
+    autoUpdater.on('download-progress', (progress) => {
+      if (settingsWindow && !settingsWindow.isDestroyed()) {
+        settingsWindow.webContents.send('update:progress', { percent: progress.percent });
+      }
+    });
+
+    autoUpdater.on('update-downloaded', () => {
+      console.log('[Updater] Update downloaded');
+      if (settingsWindow && !settingsWindow.isDestroyed()) {
+        settingsWindow.webContents.send('update:downloaded', {});
+      }
+    });
+
+    autoUpdater.on('error', (err) => {
+      console.error('[Updater] Error:', err.message);
+    });
+
+    ipcMain.handle('update:check', async () => {
+      try {
+        const result = await autoUpdater.checkForUpdates();
+        return { updateAvailable: !!result?.updateInfo, version: result?.updateInfo?.version || null };
+      } catch (err: any) {
+        return { updateAvailable: false, version: null, error: err.message };
+      }
+    });
+
+    ipcMain.handle('update:download', async () => {
+      try {
+        await autoUpdater.downloadUpdate();
+        return { success: true };
+      } catch (err: any) {
+        return { success: false, error: err.message };
+      }
+    });
+
+    ipcMain.handle('update:install', () => {
+      autoUpdater.quitAndInstall();
+    });
+
+    // Check for updates 5s after startup (non-blocking)
+    setTimeout(() => {
+      autoUpdater.checkForUpdates().catch((err) => {
+        console.log('[Updater] Initial check failed:', err.message);
+      });
+    }, 5000);
+  }
+
   // Init recognition in background
   initRecognition();
 
+  // Load record mode from persisted settings
+  recordMode = loadRecordMode();
+
   const initLocale = app.getLocale()?.startsWith('zh') ? 'zh-CN' : 'en';
-  tray = createTray(initLocale, createSettingsWindow);
+  tray = createTray(initLocale, createSettingsWindow, recordMode, (mode) => {
+    recordMode = mode;
+    const filepath = getDataPath('settings.json');
+    const existing = readJSON<any>(filepath, {});
+    existing.recordMode = mode;
+    writeJSON(filepath, existing);
+  }, true, (enabled) => {
+    // Mute on record toggle — persist and notify renderer
+    const filepath = getDataPath('settings.json');
+    const existing = readJSON<any>(filepath, {});
+    existing.muteOnRecord = enabled;
+    writeJSON(filepath, existing);
+    sendToRenderer('settings:changed', { muteOnRecord: enabled });
+  });
   startHotkey();
 
-  // Show settings on first launch so user knows the app started
-  createSettingsWindow();
+  // Show onboarding on first launch
+  const settingsPath = getDataPath('settings.json');
+  if (!require('fs').existsSync(settingsPath)) {
+    createSettingsWindow(true);
+  }
 });
 
-app.on('window-all-closed', () => {
-  // Don't quit — stays in tray
-});
+if (app) {
+  app.on('window-all-closed', () => {
+    // Don't quit — stays in tray
+  });
 
-app.on('before-quit', () => {
-  stopHotkey();
-});
+  app.on('before-quit', () => {
+    stopHotkey();
+  });
 
-app.on('activate', () => {
-  // On tray click
-});
+  app.on('activate', () => {
+    // On tray click
+  });
+}
+
+} // end if (app) main process guard

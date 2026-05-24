@@ -1,4 +1,6 @@
 import { useRef, useCallback, useState } from 'react';
+import { translate, type Locale } from '../i18n/translations';
+import { useSettingsStore } from '../store/settings';
 
 // Resample Float32Array from source rate to target rate using linear interpolation
 function resample(samples: Float32Array, srcRate: number, dstRate: number): Float32Array {
@@ -28,24 +30,20 @@ function encodeWAV(samples: Float32Array, sampleRate: number): ArrayBuffer {
   const buffer = new ArrayBuffer(headerSize + dataSize);
   const view = new DataView(buffer);
 
-  // RIFF header
   writeString(view, 0, 'RIFF');
   view.setUint32(4, 36 + dataSize, true);
   writeString(view, 8, 'WAVE');
-  // fmt chunk
   writeString(view, 12, 'fmt ');
-  view.setUint32(16, 16, true); // chunk size
-  view.setUint16(20, 1, true);  // PCM format
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true);
   view.setUint16(22, numChannels, true);
   view.setUint32(24, sampleRate, true);
   view.setUint32(28, byteRate, true);
   view.setUint16(32, blockAlign, true);
   view.setUint16(34, bitsPerSample, true);
-  // data chunk
   writeString(view, 36, 'data');
   view.setUint32(40, dataSize, true);
 
-  // Write PCM samples as int16
   for (let i = 0; i < samples.length; i++) {
     const s = Math.max(-1, Math.min(1, samples[i]));
     view.setInt16(44 + i * 2, s < 0 ? s * 0x8000 : s * 0x7FFF, true);
@@ -60,6 +58,9 @@ function writeString(view: DataView, offset: number, str: string): void {
   }
 }
 
+const SILENCE_RMS = 0.02;
+const DEFAULT_VAD_TIMEOUT_SEC = 2.0;
+
 export function useAudioCapture() {
   const [audioLevel, setAudioLevel] = useState(0);
   const audioContextRef = useRef<AudioContext | null>(null);
@@ -68,62 +69,66 @@ export function useAudioCapture() {
   const animFrameRef = useRef<number>(0);
   const pcmChunksRef = useRef<Float32Array[]>([]);
   const sampleRateRef = useRef(48000);
-  const pauseCountRef = useRef(0);
-  const silenceFramesRef = useRef(0);
-  const inSilenceRef = useRef(false);
+  const silenceDurRef = useRef(0);
+  const vadTimeoutRef = useRef(DEFAULT_VAD_TIMEOUT_SEC);
+  const vadCallbackRef = useRef<(() => void) | null>(null);
+  const vadTriggeredRef = useRef(false);
   const TARGET_RATE = 16000;
 
-  const SILENCE_RMS = 0.02;
-  const PAUSE_FRAMES = 2;
-
-  const startCapture = useCallback(async () => {
+  const startCapture = useCallback(async (deviceId?: string) => {
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({
+      const constraints: MediaStreamConstraints = {
         audio: {
           channelCount: 1,
           echoCancellation: false,
           noiseSuppression: false,
           autoGainControl: true,
+          ...(deviceId ? { deviceId: { exact: deviceId } } : {}),
         },
-      });
+      };
+      const stream = await navigator.mediaDevices.getUserMedia(constraints);
       streamRef.current = stream;
 
       const audioCtx = new AudioContext();
       audioContextRef.current = audioCtx;
       sampleRateRef.current = audioCtx.sampleRate;
-      console.log('[Audio] Capture started, sampleRate:', audioCtx.sampleRate);
 
       const source = audioCtx.createMediaStreamSource(stream);
 
-      // Analyser for waveform display
       const analyser = audioCtx.createAnalyser();
       analyser.fftSize = 256;
-      analyser.smoothingTimeConstant = 0.4;
+      analyser.smoothingTimeConstant = 0.8;
       source.connect(analyser);
       analyserRef.current = analyser;
 
-      // ScriptProcessor for PCM capture
       const bufferSize = 4096;
       const scriptNode = audioCtx.createScriptProcessor(bufferSize, 1, 1);
       pcmChunksRef.current = [];
+      silenceDurRef.current = 0;
+      vadTriggeredRef.current = false;
 
       scriptNode.onaudioprocess = (event) => {
         const inputData = event.inputBuffer.getChannelData(0);
         pcmChunksRef.current.push(new Float32Array(inputData));
 
-        // RMS-based pause detection
+        // RMS-based silence detection
         let sum = 0;
         for (let j = 0; j < inputData.length; j++) sum += inputData[j] * inputData[j];
         const rms = Math.sqrt(sum / inputData.length);
+
         if (rms < SILENCE_RMS) {
-          silenceFramesRef.current++;
-          if (silenceFramesRef.current >= PAUSE_FRAMES && !inSilenceRef.current) {
-            inSilenceRef.current = true;
-            pauseCountRef.current++;
+          silenceDurRef.current += inputData.length / sampleRateRef.current;
+          // VAD auto-stop
+          if (
+            !vadTriggeredRef.current &&
+            silenceDurRef.current >= vadTimeoutRef.current &&
+            vadTimeoutRef.current > 0
+          ) {
+            vadTriggeredRef.current = true;
+            vadCallbackRef.current?.();
           }
         } else {
-          silenceFramesRef.current = 0;
-          inSilenceRef.current = false;
+          silenceDurRef.current = 0;
         }
       };
 
@@ -131,10 +136,6 @@ export function useAudioCapture() {
       scriptNode.connect(audioCtx.destination);
 
       const dataArray = new Uint8Array(analyser.frequencyBinCount);
-
-      pauseCountRef.current = 0;
-      silenceFramesRef.current = 0;
-      inSilenceRef.current = false;
 
       const loop = () => {
         analyser.getByteTimeDomainData(dataArray);
@@ -152,12 +153,13 @@ export function useAudioCapture() {
     } catch (err: any) {
       const message = err?.message ?? 'Audio capture failed';
       console.error('Audio capture failed:', err);
-      await window.tingmo?.reportCaptureError(`麦克风启动失败：${message}`);
+      const lang = useSettingsStore.getState().uiLanguage as Locale;
+      await window.tingmo?.reportCaptureError(`${translate('error.micStartFailed', lang)}：${message}`);
       return false;
     }
   }, []);
 
-  const stopCapture = useCallback((): { wav: ArrayBuffer; pauseCount: number } | null => {
+  const stopCapture = useCallback((): { wav: ArrayBuffer; sampleRate: number } | null => {
     if (animFrameRef.current) {
       cancelAnimationFrame(animFrameRef.current);
       animFrameRef.current = 0;
@@ -186,11 +188,17 @@ export function useAudioCapture() {
       offset += chunk.length;
     }
     pcmChunksRef.current = [];
-    const pauseCount = pauseCountRef.current;
-    console.log('[Audio] Stop: samples =', totalLength, 'pauses =', pauseCount);
     const resampled = resample(combined, sampleRateRef.current, TARGET_RATE);
-    return { wav: encodeWAV(resampled, TARGET_RATE), pauseCount };
+    return { wav: encodeWAV(resampled, TARGET_RATE), sampleRate: TARGET_RATE };
   }, []);
 
-  return { audioLevel, startCapture, stopCapture };
+  const setVadTimeout = useCallback((seconds: number) => {
+    vadTimeoutRef.current = seconds;
+  }, []);
+
+  const setVadCallback = useCallback((cb: (() => void) | null) => {
+    vadCallbackRef.current = cb;
+  }, []);
+
+  return { audioLevel, startCapture, stopCapture, setVadTimeout, setVadCallback };
 }

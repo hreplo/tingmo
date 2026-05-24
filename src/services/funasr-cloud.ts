@@ -6,34 +6,71 @@ export class FunASRCloudProvider implements IRecognitionProvider {
   readonly vadEnabled = false;
   isReady = false;
 
-  constructor(private apiKey: string, private endpoint: string) {}
+  constructor(private apiKey: string, private baseUrl: string, private model: string = 'whisper-1') {}
 
   async initialize(): Promise<boolean> {
-    if (!this.apiKey || !this.endpoint) {
+    if (!this.apiKey || !this.baseUrl) {
       console.log('[FunASR-Cloud] No API key or endpoint configured');
       this.isReady = false;
       return false;
     }
     this.isReady = true;
-    console.log('[FunASR-Cloud] Ready');
+    console.log('[FunASR-Cloud] Ready, model:', this.model);
     return true;
   }
 
   async transcribe(audioBuffer: Buffer, _sampleRate: number, lang?: string): Promise<RecognitionResult> {
     const t0 = performance.now();
 
-    // TODO: POST WAV to cloud ASR endpoint
-    // POST <endpoint>/api/recognize with form-data: audio=@audio.wav, language=lang
-    // Parse response JSON: { text, language, confidence }
+    const baseUrl = this.baseUrl.replace(/\/$/, '');
+    const url = `${baseUrl}/audio/transcriptions`;
 
-    console.log('[FunASR-Cloud] Transcribe not yet implemented, buffer size:', audioBuffer.length);
-    await new Promise(r => setTimeout(r, 300));
+    // Build FormData with WAV
+    const formData = new FormData();
+    const blob = new Blob([new Uint8Array(audioBuffer)], { type: 'audio/wav' });
+    formData.append('file', blob, 'audio.wav');
+    formData.append('model', this.model);
+    formData.append('response_format', 'json');
+    // Only set language for known codes; omit for 'auto' to let Whisper auto-detect
+    if (lang && lang !== 'auto') {
+      formData.append('language', lang);
+    }
 
-    return {
-      text: '（云端 ASR 尚未实现）',
-      durationMs: performance.now() - t0,
-      language: lang || 'zh',
-    };
+    try {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 15000);
+
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${this.apiKey}`,
+        },
+        body: formData,
+        signal: controller.signal,
+      });
+
+      clearTimeout(timer);
+
+      if (!res.ok) {
+        const errText = await res.text().catch(() => '');
+        throw new Error(`Whisper API ${res.status}: ${errText.slice(0, 200)}`);
+      }
+
+      const json: any = await res.json();
+      const text = json.text?.trim() || '';
+
+      console.log('[FunASR-Cloud] Result:', text.slice(0, 60));
+
+      return {
+        text,
+        durationMs: performance.now() - t0,
+        language: lang || 'zh',
+        confidence: undefined,
+      };
+    } catch (err: any) {
+      console.error('[FunASR-Cloud] Transcription failed:', err.message);
+      throw err;
+    }
   }
 
   async dispose(): Promise<void> {

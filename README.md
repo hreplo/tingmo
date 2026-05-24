@@ -4,7 +4,7 @@
 
 *[English version](README_EN.md)*
 
-![version](https://img.shields.io/badge/version-V0.2.0-orange)
+![version](https://img.shields.io/badge/version-V0.3.0-orange)
 ![platform](https://img.shields.io/badge/platform-Windows%20x64-blue)
 ![license](https://img.shields.io/badge/license-MIT-green)
 ![vibe](https://img.shields.io/badge/vibe%20coding-yes-ff69b4)
@@ -13,8 +13,8 @@
 
 ## 特性
 
-- **本地 ASR** — Paraformer-large INT8 ONNX，228MB，完全离线
-- **智能标点** — CT-Transformer 模型自动恢复 `，。？！、`
+- **本地 ASR** — SenseVoiceSmall ONNX，230MB，完全离线，中英日韩粤 5 语言
+- **内置标点** — SenseVoice 自带 ITN 标点恢复，无需额外模型
 - **LLM 润色**（可选）— 去口语填充词 + 自动结构化 + 保留专属词汇
 - **翻译模式** — 识别后自动翻译为目标语言
 - **个性词典** — 添加专属词汇，模糊纠错 + LLM 上下文保留
@@ -23,9 +23,9 @@
 
 ## 安装
 
-从 [Releases](https://github.com/shaoxin12/tingmo/releases) 下载 `TingMo-Setup-0.2.exe`。
+从 [Releases](https://github.com/shaoxin12/tingmo/releases) 下载 `TingMo-Setup-0.3.exe`。
 
-首次启动自动下载全部模型文件（~304MB）。
+首次启动自动下载模型文件（~230MB）。
 
 ## 使用
 
@@ -39,19 +39,18 @@
 
 ## LLM 润色（可选）
 
-1. 设置 → AI 润色区域
+1. 设置 → 模型 → LLM 大模型
 2. 填入 OpenAI 兼容 API Key（支持 GPT-4o-mini / Claude / DeepSeek / 通义千问）
 3. 开启"启用润色"
 
-无需 LLM 时，ASR + CT-Transformer 标点结果直接注入，离线可用。
+无需 LLM 时，SenseVoice 自带标点结果直接注入，离线可用。
 
 ## 技术栈
 
 | 层 | 技术 |
 |----|------|
 | 框架 | Electron 33 + React 18 + TypeScript |
-| ASR | Paraformer-large INT8 ONNX (FunASR) |
-| 标点 | CT-Transformer ONNX (sherpa-onnx) |
+| ASR | SenseVoiceSmall ONNX (sherpa-onnx) |
 | LLM | OpenAI 兼容 API |
 | 音频 | Web Audio API → 16kHz 重采样 → WAV |
 | 注入 | Win32 `SendInput` + `KEYEVENTF_UNICODE` (koffi FFI) |
@@ -60,15 +59,13 @@
 
 ## 模型文件
 
-存放于 `%APPDATA%/tingmo/models/funasr/`：
+存放于 `%APPDATA%/TingMo/models/funasr/`：
 
 | 文件 | 大小 | 必需 |
 |------|------|------|
-| `paraformer-large-int8.onnx` | 228 MB | ✅ |
-| `tokens.json` | 60 KB | ✅ |
+| `model.int8.onnx` | 229 MB | ✅ |
+| `tokens.txt` | 309 KB | ✅ |
 | `am.mvn` | 11 KB | ✅ |
-| `ct-transformer.onnx` | 73 MB | ✅（INT8 标点）|
-| `punct-tokens.json` | 4 MB | ✅（标点词表）|
 
 ## 开发
 

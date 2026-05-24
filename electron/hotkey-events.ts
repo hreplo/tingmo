@@ -1,4 +1,5 @@
 export const VK_RMENU = 0xA5;
+export const VK_ESCAPE = 0x1B;
 
 export const WM_KEYDOWN = 0x0100;
 export const WM_KEYUP = 0x0101;
@@ -16,10 +17,11 @@ export interface RightAltEventAction {
   consume: boolean;
   nextWasPressed: boolean;
   triggerPressed: boolean;
+  triggerReleased: boolean;
 }
 
-const KEY_DOWN_MESSAGES = new Set([WM_KEYDOWN, WM_SYSKEYDOWN]);
-const KEY_UP_MESSAGES = new Set([WM_KEYUP, WM_SYSKEYUP]);
+export const KEY_DOWN_MESSAGES = new Set([WM_KEYDOWN, WM_SYSKEYDOWN]);
+export const KEY_UP_MESSAGES = new Set([WM_KEYUP, WM_SYSKEYUP]);
 
 export function getRightAltEventAction(input: RightAltEventInput): RightAltEventAction {
   if (input.nCode < 0 || input.vkCode !== VK_RMENU) {
@@ -27,22 +29,30 @@ export function getRightAltEventAction(input: RightAltEventInput): RightAltEvent
       consume: false,
       nextWasPressed: input.wasPressed,
       triggerPressed: false,
+      triggerReleased: false,
     };
   }
 
   if (KEY_DOWN_MESSAGES.has(input.message)) {
+    // Consume key-down to prevent Alt from stealing focus / activating menus
+    // in the active app.  A synthetic key-up is injected immediately after
+    // (see hotkey.ts) so Windows does not think Alt is stuck.
     return {
       consume: true,
       nextWasPressed: true,
       triggerPressed: !input.wasPressed,
+      triggerReleased: false,
     };
   }
 
   if (KEY_UP_MESSAGES.has(input.message)) {
+    // Real key-up: consume to match the consumed key-down (no orphan event).
+    // Injected key-ups are detected in hotkey.ts and passed through.
     return {
       consume: true,
       nextWasPressed: false,
       triggerPressed: false,
+      triggerReleased: input.wasPressed,
     };
   }
 
@@ -50,5 +60,6 @@ export function getRightAltEventAction(input: RightAltEventInput): RightAltEvent
     consume: false,
     nextWasPressed: input.wasPressed,
     triggerPressed: false,
+    triggerReleased: false,
   };
 }

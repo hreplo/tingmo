@@ -9,10 +9,6 @@ export interface RecognitionDone {
   durationMs: number;
 }
 
-export interface InjectFailed {
-  text: string;
-}
-
 const api = {
   onVoiceStateChange: (callback: (data: VoiceStateChange) => void) => {
     const handler = (_event: Electron.IpcRendererEvent, data: VoiceStateChange) => callback(data);
@@ -32,17 +28,10 @@ const api = {
     return () => ipcRenderer.removeListener('voice:recognition-done', handler);
   },
 
-  onInjectFailed: (callback: (data: InjectFailed) => void) => {
-    const handler = (_event: Electron.IpcRendererEvent, data: InjectFailed) => callback(data);
-    ipcRenderer.on('voice:inject-failed', handler);
-    return () => ipcRenderer.removeListener('voice:inject-failed', handler);
-  },
-
   openSettings: () => ipcRenderer.invoke('settings:open'),
   finishRecording: () => ipcRenderer.invoke('voice:finish-recording'),
   cancelRecording: () => ipcRenderer.invoke('voice:cancel-recording'),
   reportCaptureError: (message: string) => ipcRenderer.invoke('voice:capture-error', message),
-  retryInject: (text: string) => ipcRenderer.invoke('voice:retry-inject', text),
   copyText: (text: string) => ipcRenderer.invoke('voice:copy-text', text),
 
   // Model download progress
@@ -55,10 +44,12 @@ const api = {
   // Send audio buffer to main process for transcription
   transcribe: (audioBuffer: ArrayBuffer, language?: string, opts?: {
     translate?: boolean; translateTarget?: string; dictionary?: Array<{word: string; replace: string}>;
+    polishMode?: string; customPrompt?: string;
   }) => ipcRenderer.invoke('voice:transcribe', audioBuffer, language, opts),
 
   // Stats & history
   getStats: () => ipcRenderer.invoke('stats:get'),
+  getOverview: () => ipcRenderer.invoke('stats:overview'),
   getHistory: () => ipcRenderer.invoke('history:get'),
   clearHistory: () => ipcRenderer.invoke('history:clear'),
 
@@ -68,6 +59,11 @@ const api = {
     const handler = (_event: Electron.IpcRendererEvent, data: { enabled: boolean }) => callback(data);
     ipcRenderer.on('voice:translate-mode', handler);
     return () => ipcRenderer.removeListener('voice:translate-mode', handler);
+  },
+  onRefineFailed: (callback: (data: { error: string }) => void) => {
+    const handler = (_event: Electron.IpcRendererEvent, data: { error: string }) => callback(data);
+    ipcRenderer.on('voice:refine-failed', handler);
+    return () => ipcRenderer.removeListener('voice:refine-failed', handler);
   },
 
   // LLM / Refinement settings
@@ -79,6 +75,38 @@ const api = {
   getRefinementStatus: () => ipcRenderer.invoke('settings:refinement-status'),
   getSystemLocale: () => ipcRenderer.invoke('settings:get-system-locale') as Promise<string>,
   setUiLanguage: (lang: string) => ipcRenderer.invoke('settings:set-ui-language', lang),
+
+  // Debug
+  debugSaveWav: (buffer: ArrayBuffer, filename: string) => ipcRenderer.invoke('debug:save-wav', buffer, filename),
+
+  // App settings persistence
+  loadAppSettings: () => ipcRenderer.invoke('settings:load-app-settings') as Promise<Record<string, unknown>>,
+  saveAppSettings: (settings: Record<string, unknown>) => ipcRenderer.invoke('settings:save-app-settings', settings),
+  onSettingsChanged: (callback: (data: { muteOnRecord?: boolean; recordMode?: string }) => void) => {
+    const handler = (_event: Electron.IpcRendererEvent, data: any) => callback(data);
+    ipcRenderer.on('settings:changed', handler);
+    return () => ipcRenderer.removeListener('settings:changed', handler);
+  },
+
+  // Auto-update
+  onUpdateAvailable: (callback: (data: { version: string }) => void) => {
+    const handler = (_event: Electron.IpcRendererEvent, data: { version: string }) => callback(data);
+    ipcRenderer.on('update:available', handler);
+    return () => ipcRenderer.removeListener('update:available', handler);
+  },
+  onUpdateProgress: (callback: (data: { percent: number }) => void) => {
+    const handler = (_event: Electron.IpcRendererEvent, data: { percent: number }) => callback(data);
+    ipcRenderer.on('update:progress', handler);
+    return () => ipcRenderer.removeListener('update:progress', handler);
+  },
+  onUpdateDownloaded: (callback: () => void) => {
+    const handler = () => callback();
+    ipcRenderer.on('update:downloaded', handler);
+    return () => ipcRenderer.removeListener('update:downloaded', handler);
+  },
+  checkForUpdates: () => ipcRenderer.invoke('update:check') as Promise<{ updateAvailable: boolean; version: string | null; error?: string }>,
+  downloadUpdate: () => ipcRenderer.invoke('update:download') as Promise<{ success: boolean; error?: string }>,
+  installUpdate: () => ipcRenderer.invoke('update:install'),
 };
 
 contextBridge.exposeInMainWorld('tingmo', api);

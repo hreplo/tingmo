@@ -18,22 +18,18 @@ export interface InjectResult {
   durationMs: number;
 }
 
-// INPUT struct on x64: type(4) + pad(4) + union(32) = 40 bytes
-// KEYBDINPUT within union: wVk(2) + wScan(2) + dwFlags(4) + time(4) + padding(4) + dwExtraInfo(8) = 24
 const INPUT_SIZE = 40;
-// Pre-allocate reusable buffer to avoid repeated koffi.as() pointer invalidation
 const inputBuf = Buffer.alloc(INPUT_SIZE);
 
 function fillInputStruct(codePoint: number, flags: number): void {
   inputBuf.fill(0);
   let offset = 0;
-  offset = inputBuf.writeUInt32LE(INPUT_KEYBOARD, offset); // type
-  offset += 4;                                              // padding
-  offset = inputBuf.writeUInt16LE(0, offset);              // wVk
-  offset = inputBuf.writeUInt16LE(codePoint, offset);      // wScan (Unicode codepoint)
-  offset = inputBuf.writeUInt32LE(flags, offset);           // dwFlags
-  offset = inputBuf.writeUInt32LE(0, offset);              // time
-  // dwExtraInfo at offset 24 (8-byte aligned)
+  offset = inputBuf.writeUInt32LE(INPUT_KEYBOARD, offset);
+  offset += 4;
+  offset = inputBuf.writeUInt16LE(0, offset);
+  offset = inputBuf.writeUInt16LE(codePoint, offset);
+  offset = inputBuf.writeUInt32LE(flags, offset);
+  offset = inputBuf.writeUInt32LE(0, offset);
   inputBuf.writeBigUInt64LE(0n, 24);
 }
 
@@ -44,12 +40,10 @@ export async function injectText(text: string): Promise<InjectResult> {
     const codePoint = ch.codePointAt(0) ?? 0;
 
     fillInputStruct(codePoint, KEYEVENTF_UNICODE);
-    const ptr = koffi.as(inputBuf, 'void *');
-    SendInput(1, ptr, INPUT_SIZE);
+    SendInput(1, koffi.as(inputBuf, 'void *'), INPUT_SIZE);
 
     fillInputStruct(codePoint, KEYEVENTF_UNICODE | KEYEVENTF_KEYUP);
-    const ptr2 = koffi.as(inputBuf, 'void *');
-    SendInput(1, ptr2, INPUT_SIZE);
+    SendInput(1, koffi.as(inputBuf, 'void *'), INPUT_SIZE);
   }
 
   return {

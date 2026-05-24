@@ -1,18 +1,16 @@
 import { useState, useEffect, useCallback } from 'react';
 
-export type VoiceState = 'idle' | 'recording' | 'recognizing' | 'refining' | 'success' | 'error';
+export type VoiceState = 'idle' | 'recording' | 'recognizing' | 'refining' | 'success';
 
 interface VoiceInputState {
   state: VoiceState;
   charCount: number | null;
-  errorText: string | null;
 }
 
 export function useVoiceInput() {
   const [voiceState, setVoiceState] = useState<VoiceInputState>({
     state: 'idle',
     charCount: null,
-    errorText: null,
   });
   const [translateMode, setTranslateMode] = useState(false);
 
@@ -32,15 +30,6 @@ export function useVoiceInput() {
       setVoiceState({
         state: 'success',
         charCount: data.charCount,
-        errorText: null,
-      });
-    });
-
-    const unsub3 = api.onInjectFailed((data) => {
-      setVoiceState({
-        state: 'error',
-        charCount: null,
-        errorText: data.text,
       });
     });
 
@@ -51,22 +40,9 @@ export function useVoiceInput() {
     return () => {
       unsub1();
       unsub2();
-      unsub3();
       unsub4?.();
     };
   }, []);
-
-  const retry = useCallback(async () => {
-    if (voiceState.errorText) {
-      await window.tingmo?.retryInject(voiceState.errorText);
-    }
-  }, [voiceState.errorText]);
-
-  const copy = useCallback(async () => {
-    if (voiceState.errorText) {
-      await window.tingmo?.copyText(voiceState.errorText);
-    }
-  }, [voiceState.errorText]);
 
   const finish = useCallback(async () => {
     await window.tingmo?.finishRecording();
@@ -79,10 +55,7 @@ export function useVoiceInput() {
   return {
     state: voiceState.state,
     charCount: voiceState.charCount,
-    errorText: voiceState.errorText,
     translateMode,
-    retry,
-    copy,
     finish,
     cancel,
   };

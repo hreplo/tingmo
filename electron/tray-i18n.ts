@@ -11,6 +11,7 @@ const dict: Record<string, Record<Locale, string>> = {
   'tray.recordMode.toggle': { 'zh-CN': '切换',   'zh-TW': '切換',   en: 'Toggle',   ja: '切替',    ko: '전환' },
   'tray.recordMode.hold':   { 'zh-CN': '按住',   'zh-TW': '按住',   en: 'Hold',     ja: '長押し',  ko: '길게 누르기' },
   'tray.settings':          { 'zh-CN': '设置',   'zh-TW': '設定',   en: 'Settings', ja: '設定',    ko: '설정' },
+  'tray.muteOnRecord':      { 'zh-CN': '录音时静音','zh-TW':'錄音時靜音',en:'Mute while recording',ja:'録音中ミュート',ko:'녹음 중 음소거' },
   'tray.quit':              { 'zh-CN': '退出',   'zh-TW': '退出',   en: 'Quit',     ja: '終了',    ko: '종료' },
 };
 

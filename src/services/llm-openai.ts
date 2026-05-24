@@ -15,7 +15,7 @@ export class OpenAIProvider implements IRefinementProvider {
 
   async refine(rawText: string, context?: RefineContext): Promise<RefinementResult> {
     const t0 = performance.now();
-    const systemPrompt = buildRefinePrompt(context?.dictionary);
+    const systemPrompt = buildRefinePrompt(context);
     return this.callAPI(systemPrompt, rawText, t0);
   }
 

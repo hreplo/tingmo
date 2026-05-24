@@ -1,12 +1,12 @@
-# 听墨 (TingMo) v0.2.0 — Windows 桌面 AI 语音输入法
+# 听墨 (TingMo) v0.3.0 — Windows 桌面 AI 语音输入法
 
 按右 Alt 开始录音，说话，再按右 Alt 停止，语音自动转文字注入光标。右 Alt + 右 Shift 触发翻译模式。
 
-**v0.2.0**: Paraformer-large INT8 本地 ASR + CT-Transformer 标点 + LLM 润色（OpenAI 兼容 API）
+**v0.3.0**: SenseVoiceSmall 本地 ASR（sherpa-onnx，中英日韩粤 + 内置 ITN 标点）+ LLM 润色/翻译（OpenAI 兼容 API，同一套 Key/Model/Endpoint，不同 System Prompt）
 
 ## 技术栈
 
-Electron 33 + React 18 + TypeScript + Vite | esbuild 编译主进程 | koffi FFI 调 Win32 API | onnxruntime-node | Zustand | 5 语言 i18n
+Electron 33 + React 18 + TypeScript + Vite | esbuild 编译主进程 | koffi FFI 调 Win32 API | sherpa-onnx WASM | Zustand | 5 语言 i18n
 
 ## 运行
 
@@ -15,6 +15,7 @@ npm run dev            # Vite dev server (端口 5173)
 npm run electron:dev   # 构建主进程 + 启动 Electron
 npm run build          # 完整构建: tsc + vite build + esbuild main/preload
 npm run build:main     # 仅构建主进程和 preload
+npm run electron:build # 完整构建 + electron-builder 打包
 ```
 
 开发需两个终端：`npm run dev` + `npm run electron:dev`。
@@ -23,108 +24,108 @@ npm run build:main     # 仅构建主进程和 preload
 
 | 进程 | 职责 |
 |------|------|
-| Main (`electron/main.ts`) | App 生命周期、键盘钩子、文字注入、托盘、ASR+标点 ONNX 推理、LLM 润色、词典纠错、统计/历史 |
+| Main (`electron/main.ts`) | App 生命周期、键盘钩子、文字注入、托盘、sherpa-onnx ASR 推理、LLM 润色/翻译、词典纠错、统计/历史、自动更新 |
 | Renderer (`src/`) | React UI：浮窗胶囊、设置窗口、音频采集 |
 | Preload (`electron/preload.ts`) | contextBridge 暴露 `window.tingmo` API |
 
 ### 状态机
 
 ```
-IDLE →(右Alt)→ RECORDING →(右Alt)→ RECOGNIZING →(refining)→ SUCCESS/ERROR →(1.5s)→ IDLE
+IDLE →(右Alt)→ RECORDING →(右Alt)→ RECOGNIZING →(refining)→ SUCCESS →(800ms dismiss)→ IDLE
 ```
 
-`refining` 仅在 LLM 润色/翻译时出现，离线时跳过。
+`refining` 仅在 LLM 润色/翻译时出现，离线时跳过。任何错误直接回到 IDLE。
 
 ### 数据流
 
-1. 右 Alt → `SetWindowsHookExW` → Main 发 `voice:state-change` → 浮窗显示
-2. 渲染进程 Web Audio API 采集 PCM → 线性插值重采样到 16kHz → 编码 WAV → IPC `voice:transcribe`
+1. 右 Alt → `SetWindowsHookExW` → Main 拦截 key-down（`consume: true`）+ 注入虚假 key-up（`keybd_event` 防卡键）→ 发 `voice:state-change` + `voice:translate-mode` → 浮窗显示
+2. 渲染进程 Web Audio API 采集 PCM（AGC 开启 + 0.8 平滑）→ 线性插值重采样到 16kHz → 编码 WAV → IPC `voice:transcribe`
 3. Main 进程：
-   - **Fbank 特征提取**（Hamming窗→FFT→Mel→LFR→CMVN）→ Paraformer-large ONNX → 原始文字
-   - **CT-Transformer 标点**（可选，模型在 `%APPDATA%/tingmo/models/funasr/ct-transformer.onnx`）→ `，。？、`
-   - **词典模糊纠错**（Levenshtein 编辑距离 ≤1~2）→ 修正同音误判
-   - **LLM 润色**（可选，需 API Key）：去口语 + 结构化 + 保留专属词汇
-   - **LLM 翻译**（可选）：复用润色 provider，切换 System Prompt
-4. `SendInput + KEYEVENTF_UNICODE` 逐字符注入
+   - sherpa-onnx 加载 SenseVoiceSmall ONNX → 带标点文字（内置 ITN，语言自动检测）
+   - **幻听过滤**（白名单：单字/短词幻觉）
+   - **词典模糊纠错**（Levenshtein 编辑距离，短词容错 ≤1，长词 ≤2）
+   - **LLM 润色**（`refineEnabled` 开启时）→ 5 种模式 + 自定义 Prompt
+   - **LLM 翻译**（右 Shift 触发时）→ 复用润色的 LLM Provider（同一 API Key/Model/Endpoint）
+4. `SendInput + KEYEVENTF_UNICODE` 逐字符 Unicode 注入
 5. 统计/历史持久化到 `userData/data/`
-6. 成功 1.5s 后隐藏；失败显示重试/复制
+6. 渲染进程 800ms 后自动播放 dismiss 动画，回到 IDLE
+
+### worker 上下文保护
+
+sherpa-onnx 内部 Web Worker 会加载主进程打包文件。模块顶层所有 `app.*` 调用必须用 `if (app)` 守卫或 `try-catch` 包裹，否则在 worker 上下文中 `app` 为 undefined 导致崩溃弹窗。
 
 ## 核心文件
 
 ```
 electron/
-├── main.ts              # App 生命周期、IPC、ASR 推理管线、LLM 润色、词典纠错、统计/历史
+├── main.ts              # App 生命周期、IPC、ASR 推理管线、LLM 润色/翻译、词典纠错、统计/历史、自动更新
 ├── preload.ts           # window.tingmo API (IPC bridge)
-├── hotkey.ts            # SetWindowsHookExW 低层键盘钩子 (koffi)
-├── hotkey-events.ts     # 按键去重、右 Alt 状态跟踪
+├── hotkey.ts            # SetWindowsHookExW 低层键盘钩子 (koffi) + keybd_event 虚假 key-up 防卡键
+├── hotkey-events.ts     # 按键去重、右 Alt 状态跟踪（key-down consume、key-up consume）、Esc 检测
 ├── text-inserter.ts     # SendInput Unicode 逐字符注入 (koffi)
-├── tray.ts              # 系统托盘（状态叠加色点）
-├── tray-i18n.ts         # 托盘菜单翻译
-├── audio-ducking.ts     # 录音时静音系统音频
-└── stats-history.ts     # 统计/历史持久化
+├── tray.ts              # 系统托盘（状态叠加色点、NB 风格菜单）
+├── tray-i18n.ts         # 托盘菜单翻译 (5 语言)
+├── audio-ducking.ts     # 录音时静音系统音频 (PowerShell COM)
+├── stats-history.ts     # 统计/历史/每日统计持久化 (JSON)
+└── logger.ts            # 文件日志（未启用，直接 console）
 
 src/
-├── App.tsx              # I18nProvider + hash 路由: / → 浮窗, /#/settings → 设置
+├── App.tsx              # I18nProvider + hash 路由: / → 浮窗, #/settings → 设置, #/onboarding → 引导
 ├── env.d.ts             # window.tingmo 类型声明
 ├── main.tsx             # React entry
 ├── i18n/
-│   ├── translations.ts  # 5 语言翻译字典 (zh-CN/zh-TW/en/ja/ko)
+│   ├── translations.ts  # 5 语言翻译字典 (~100 键)
 │   └── context.tsx      # React i18n Context + Provider + useI18n() hook
 ├── components/
-│   ├── FloatingWindow.tsx  # 胶囊 140×48px (呼吸灯+波形/状态/错误面板)
-│   ├── BreathingLight.tsx  # 呼吸灯动画
-│   ├── Waveform.tsx        # Canvas 波形
-│   ├── ErrorPanel.tsx      # 重试/复制按钮
-│   ├── StatusOverlay.tsx   # 状态文字
+│   ├── FloatingWindow.tsx    # 黑色胶囊 118×38px（15 根竖条波形，Web Animations API + flushSync 稳定性）
 │   └── Settings/
-│       ├── SettingsWindow.tsx  # NB 风格设置窗口 (侧边栏+卡片+5语言切换)
+│       ├── SettingsWindow.tsx  # NB 风格设置窗口 (侧边栏 4 Tab)
+│       ├── HomePanel.tsx       # 主页：今日统计 + 累计统计 + 近 7 天柱状图 + 历史列表
+│       ├── DictionaryPanel.tsx # 单输入词典 (标签展示)
 │       ├── HotkeyRecorder.tsx  # 快捷键录制 (i18n 修饰键名)
-│       ├── NbSelect.tsx       # 自定义 NB 下拉菜单
-│       ├── HistoryPanel.tsx   # 历史记录 + 统计
-│       └── DictionaryPanel.tsx # 单输入词典 (标签展示)
+│       ├── NbSelect.tsx        # 自定义 NB 下拉菜单
+│       ├── MicDevicePicker.tsx # 麦克风设备枚举 + 选择
+│       ├── UpdatePanel.tsx     # 自动更新：检查/下载/安装 + 进度条
+│       └── OnboardingWizard.tsx # 首次启动 3 步引导 (i18n 快捷键名)
 ├── hooks/
-│   ├── useVoiceInput.ts   # 状态机 hook
-│   └── useAudioCapture.ts # Web Audio 采集 + 16kHz 重采样 + WAV + RMS 停顿检测
+│   ├── useVoiceInput.ts   # IPC → React 状态机 hook (idle/recording/recognizing/refining/success)
+│   └── useAudioCapture.ts # Web Audio 采集 + 16kHz 重采样 + WAV 编码 + RMS 静音检测
 ├── services/
 │   ├── speech-recognition.ts  # IRecognitionProvider 接口
-│   ├── funasr-ort.ts         # Paraformer + CT-Transformer ONNX (Fbank/LFR/CMVN/CTC)
-│   ├── funasr-cloud.ts       # 云端 ASR 骨架 (待实现)
-│   ├── llm-refine.ts         # IRefinementProvider 接口 + System Prompt (词典感知)
-│   ├── llm-openai.ts         # OpenAI 兼容 API 实现
-│   ├── model-downloader.ts   # 首次启动下载模型 (GitHub Releases)
-│   └── mock-recognition.ts   # 开发用 mock 识别
-├── store/settings.ts      # Zustand store
-└── styles/global.css      # 全局样式 (胶囊/NB设置/波形/历史/词典/开关/输入框)
+│   ├── funasr-sherpa.ts       # SherpaASRProvider — sherpa-onnx 本地 ASR
+│   ├── funasr-cloud.ts        # FunASRCloudProvider — OpenAI Whisper API 云端 ASR
+│   ├── llm-refine.ts          # IRefinementProvider 接口 + 5 种润色模式/1 种翻译 System Prompt
+│   ├── llm-openai.ts          # OpenAIProvider — OpenAI 兼容 chat/completions API（润色和翻译共用）
+│   └── model-downloader.ts    # 首次启动下载 SenseVoiceSmall 模型 (GitHub Releases)
+├── store/settings.ts      # Zustand store (精简后字段 + 持久化/水合)
+└── styles/global.css      # 全局样式 (胶囊/波形条/NB设置/历史/词典/开关/输入框/柱状图)
 ```
-
-## 模型文件
-
-存放于 `%APPDATA%/tingmo/models/funasr/`：
-
-| 文件 | 大小 | 用途 | 必需 |
-|------|------|------|------|
-| `paraformer-large-int8.onnx` | 228MB | ASR 引擎 | ✅ |
-| `tokens.json` | 60KB | ASR 词表 (8404 tokens) | ✅ |
-| `am.mvn` | 11KB | CMVN 归一化参数 | ✅ |
-| `config.json` | 1KB | 模型配置 | ✅ |
-| `ct-transformer.onnx` | 73MB | CT-Transformer 标点 (INT8) | ✅ |
-| `punct-tokens.json` | 4MB | 标点词表 (272727 tokens) | ✅ |
 
 ## 设置窗口
 
-NB 风格：纯白底 `#FFF`、黑边框、橙色 `#FF5A1F` 点缀。左侧 175px 导航栏（5 个单标签按钮，激活黑底白字）。右侧卡片式内容区。
+NB 风格：纯白底 `#FFF`、黑边框、橙色 `#FF5A1F` 点缀。左侧 175px 导航栏（4 个按钮，激活黑底白字）。右侧卡片式内容区。
 
 | 标签 | 内容 |
 |------|------|
-| **历史** | 累计时长、累计字数、最近记录、清空按钮 |
+| **主页** | 今日次数/时长/字数 + 累计统计 + 近 7 天柱状图 + 搜索/清空历史列表 |
 | **词典** | 单输入添加词汇、标签展示、× 删除、模糊纠错 |
-| **模型** | Paraformer-large INT8 / CT-Transformer / FSMN-VAD / ONNX Runtime |
-| **设置** | 语音模式(本地/API)、识别语言、快捷键录制、翻译目标语言、开机自启/录音静音/启用词典/界面语言 |
-| **关于** | 简介 + 技术栈标签 |
+| **模型** | ASR（本地/API 切换；本地模式显示引擎+框架，云模式只显示 Key）+ LLM（Key/模型/端点/润色开关，翻译复用此配置） |
+| **设置** | 快捷键、音频（麦克风/录音静音）、翻译（目标语言选择器，翻译复用 LLM 配置）、选项（开机自启/词典/界面语言）、关于、更新 |
 
 ### 界面语言
 
-侧边栏单标签 + 5 语言下拉切换（简体中文 / 繁體中文 / English / 日本語 / 한국어）。首启根据 `app.getLocale()` 自动检测。
+侧边栏底部 5 语言下拉切换（简体中文 / 繁體中文 / English / 日本語 / 한국어）。首启根据 `app.getLocale()` 自动检测。所有 UI 文字通过 i18n 翻译，禁止硬编码中文。
+
+### UI 样式要点
+
+- `.nb-tag.accent` 橙色铭牌：12px 字体，padding 4×12
+- `.nb-dot` 侧边栏橙色方块：14×14px，品牌区居中
+- `.nb-nav-item` 侧边栏按钮：13px 字体
+- 柱状图统一 `#FF5A1F` 橙色 + 2px `#000` 黑色描边 + `box-sizing: border-box`
+- `.nb-section:first-child` margin-top: 12px；其余 24px
+- `.nb-main` 内容区 padding-top: 0
+- `.home-dur-unit` 时长单位：0.65em / opacity 0.7（今日数字 28px 时约 18px）
+- `.home-today-number` `text-align: center`
 
 ## 词典
 
@@ -132,39 +133,84 @@ NB 风格：纯白底 `#FFF`、黑边框、橙色 `#FF5A1F` 点缀。左侧 175p
 - **始终**：ASR 输出后模糊纠错（Levenshtein 编辑距离，短词容错 ≤1，长词 ≤2）
 - **LLM 启用时**：System Prompt 中声明专属词汇保持不修改
 
-词典面板：输入一个词 → 添加 → 以 NB 标签展示 → × 删除。
+## LLM 润色/翻译
+
+- 润色和翻译**共用同一个 LLM Provider**（API Key、Model、Base URL）
+- `refineEnabled` 控制自动润色是否执行
+- 翻译始终可用（只要有 LLM Provider），通过不同 System Prompt 实现
+- 无独立翻译 API Key / Model / Endpoint 配置
+- LLM Provider 在有 API Key 时总是创建，不受 `refineEnabled` 影响
+
+## 位置漂移修复
+
+浮窗定位的完整方案（`electron/main.ts`），禁止恢复为原始缓存方式：
+
+- 使用屏幕物理边界 `display.bounds` + `display.workArea` 计算任务栏高度
+- `setBounds` 原子设置位置+尺寸（非 `setPosition`）
+- 不监听 `moved` 事件（DWM 微调会污染缓存）
+- 不缓存 `floatingPosition`（每次呼出重新计算）
+- `setImmediate` 二次定位：show 后在下一个 tick 覆盖 DWM 异步调整
+
+## 键盘钩子防卡键
+
+- 右 Alt key-down: `consume: true`（拦截，防止 IDE 失焦）
+- 拦截后立即 `keybd_event(VK_RMENU, 0, KEYEVENTF_KEYUP, 0)` 注入虚假 key-up
+- 钩子检测 `LLKHF_INJECTED` 标志，注入事件放行给系统
+- 真实 key-up: `consume: true`（无应用见过 key-down，弹起无意义）
+
+## 胶囊稳定性
+
+- appear 动画使用 `flushSync(() => setVisible(true))`（React 18）强制同步 DOM 提交
+- dismiss 延迟 800ms（渲染进程端 timer）+ 200ms 动画
 
 ## IPC API (`window.tingmo`)
 
 | 方法 | 方向 | 用途 |
 |------|------|------|
 | `onVoiceStateChange(cb)` | Main→Renderer | 状态变化 |
-| `onRecognitionDone(cb)` | Main→Renderer | 识别完成 |
-| `onInjectFailed(cb)` | Main→Renderer | 注入失败 |
+| `onRecognitionDone(cb)` | Main→Renderer | 识别完成 (charCount, durationMs) |
 | `onModelProgress(cb)` | Main→Renderer | 模型下载进度 |
 | `onTranslateMode(cb)` | Main→Renderer | 翻译模式激活 |
+| `onRefineFailed(cb)` | Main→Renderer | 润色失败通知 |
+| `onSettingsChanged(cb)` | Main→Renderer | 设置变更通知 |
 | `openSettings()` | Renderer→Main | 打开设置窗口 |
-| `transcribe(buf, lang?, opts?)` | Renderer→Main | 发送音频，opts: {translate, translateTarget, dictionary} |
-| `retryInject(text)` | Renderer→Main | 重试注入 |
+| `transcribe(buf, lang, opts?)` | Renderer→Main | 发送音频（opts: translate, translateTarget, dictionary, polishMode, customPrompt） |
 | `copyText(text)` | Renderer→Main | 复制到剪贴板 |
-| `reportCaptureError(msg)` | Renderer→Main | 报告采集错误 |
-| `getStats()` | Renderer→Main | 获取统计数据 |
-| `getHistory()` | Renderer→Main | 获取历史记录 |
-| `clearHistory()` | Renderer→Main | 清空历史 |
-| `setTranslateModifier(key)` | Renderer→Main | 设置翻译修饰键 VK |
-| `getSystemLocale()` | Renderer→Main | 获取系统语言 |
-| `setUiLanguage(lang)` | Renderer→Main | 设置界面语言（更新托盘） |
-| `getApiKey()` | Renderer→Main | 读取加密 API Key |
-| `setApiKey(key)` | Renderer→Main | 加密存储 API Key |
-| `saveLlmSettings(settings)` | Renderer→Main | 持久化 LLM 配置 |
-| `initRefinement()` | Renderer→Main | 初始化润色引擎 |
-| `getRefinementStatus()` | Renderer→Main | 查询润色状态 |
+| `cancelRecording()` | Renderer→Main | 取消录音 |
+| `finishRecording()` | Renderer→Main | 结束录音 |
+| `getStats()` / `getOverview()` | Renderer→Main | 统计数据 |
+| `getHistory()` / `clearHistory()` | Renderer→Main | 历史记录 |
+| `getSystemLocale()` / `setUiLanguage()` | Renderer→Main | 界面语言 |
+| `getApiKey()` / `setApiKey()` | Renderer→Main | API Key 加解密 |
+| `saveLlmSettings(s)` | Renderer→Main | LLM 配置持久化（refineEnabled, llmModel, llmBaseUrl, asrProvider） |
+| `initRefinement()` | Renderer→Main | 初始化 LLM Provider（润色/翻译共用） |
+| `getRefinementStatus()` | Renderer→Main | 查询 LLM 状态 |
+| `loadAppSettings()` / `saveAppSettings()` | Renderer→Main | 设置持久化 |
+| `checkForUpdates()` / `downloadUpdate()` / `installUpdate()` | Renderer→Main | 自动更新 |
+| `onUpdateAvailable/Progress/Downloaded` | Main→Renderer | 更新事件 |
+| `debugSaveWav(buf, name)` | Renderer→Main | 调试录音保存 |
 
-## 已知限制
+## 翻译目标语言
 
-- **仅 Win x64**: 不支持其他平台
-- **云端 ASR**: 骨架已建 (`funasr-cloud.ts`)，待实现
-- **FSMN-VAD**: 模型未包含，离线 VAD 不可用
-- **开机自启**: 开关已加，实际自启逻辑待实现
-- **API Key 加密**: 使用 Electron safeStorage (DPAPI)，仅本机可解密
-- **模型下载**: Windows tar 解压可能失败，需 `tar` 命令在 PATH
+`en` / `zh` / `ja` / `ko` / `fr` / `de` / `es`（TranslateLang 类型）
+
+## 模型文件
+
+存放于 `%APPDATA%/TingMo/models/funasr/`：
+
+| 文件 | 大小 | 用途 |
+|------|------|------|
+| `model.int8.onnx` | 229MB | SenseVoiceSmall INT8 |
+| `tokens.txt` | 309KB | 词表 (25055 tokens) |
+
+## 已知限制 / 重要教训
+
+- **仅 Win x64**：不支持其他平台
+- **API Key 加密**：Electron safeStorage (DPAPI)，仅本机解密
+- **SendInput 无法检测注入成功/失败**：需 TSF 才能精准检测
+- **透明窗口 + box-shadow = 灰色光晕**：胶囊永不使用外阴影
+- **CSS @keyframes animationend 不可靠**：统一用 Web Animations API
+- **esbuild CJS 中不可顶层 return**：ESM 文件使用 `if (app) { ... }` 守卫替代
+- **位置漂移**：禁止恢复 `win.on('moved')` 和 `floatingPosition` 缓存，详见"位置漂移修复"章节
+- **键盘卡键**：右 Alt key-up 不可放行，必须用虚假 key-up 注入机制，详见"键盘钩子防卡键"章节
+- **设置文件双重存储**：`settings.json`（App 设置）+ `llm-settings.json`（LLM/ASR 设置），两者独立但 asrProvider 在两个文件中都存在
